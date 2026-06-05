@@ -258,9 +258,13 @@ pub fn program_available(program: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     //! A canned-output spawner for unit tests, plus a gate factory.
+    //!
+    //! Available to downstream crates' tests via the `test-support` feature
+    //! (dev-dependencies only — never enable it in a normal build). House
+    //! rule: unit tests NEVER spawn real processes; this is how.
 
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -278,6 +282,8 @@ pub(crate) mod test_support {
     }
 
     impl MockSpawner {
+        /// A spawner that replies with `outputs`, in order (then empty-ok).
+        #[must_use]
         pub fn with_outputs(outputs: Vec<ExecOutput>) -> Self {
             Self {
                 outputs: Mutex::new(outputs.into()),
@@ -285,6 +291,8 @@ pub(crate) mod test_support {
             }
         }
 
+        /// A canned success with this stdout.
+        #[must_use]
         pub fn ok(stdout: &str) -> ExecOutput {
             ExecOutput {
                 stdout: stdout.to_string(),
@@ -293,6 +301,8 @@ pub(crate) mod test_support {
             }
         }
 
+        /// A canned failure with this stderr and exit code.
+        #[must_use]
         pub fn fail(stderr: &str, code: i32) -> ExecOutput {
             ExecOutput {
                 stderr: stderr.to_string(),

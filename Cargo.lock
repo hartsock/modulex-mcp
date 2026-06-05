@@ -685,6 +685,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "modulex-mcp"
+version = "0.6.20260605"
+dependencies = [
+ "anyhow",
+ "clap",
+ "modulex-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

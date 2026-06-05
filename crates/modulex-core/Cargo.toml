@@ -8,6 +8,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+# Exposes exec::test_support (MockSpawner, gate_with) to downstream crates'
+# tests. Dev-dependencies only.
+test-support = []
+
 [dependencies]
 agent-bridle-core = { workspace = true }
 anyhow = { workspace = true }
