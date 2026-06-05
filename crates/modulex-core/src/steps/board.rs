@@ -214,6 +214,7 @@ mod tests {
             generation: 1,
             exec: gate_with(&Caveats::top(), Arc::new(MockSpawner::default())),
             prior: Vec::new(),
+            store: None,
         }
     }
 
