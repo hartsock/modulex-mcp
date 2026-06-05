@@ -9,16 +9,26 @@
 //! | `countdown-calc` | [`dates`] | — |
 //! | `script` | [`script`] | the configured command |
 //! | `harness` | [`script`] | the configured command (JSON-on-stdout) |
+//! | `github-pr-scan` | [`github`] | gh |
+//! | `gitlab-mr-authored` | [`gitlab`] | glab |
+//! | `gitlab-mr-review` | [`gitlab`] | glab |
+//! | `gitlab-group-mrs` | [`gitlab`] | glab |
+//! | `mr-sla-check` | [`gitlab`] | — (derived from prior results) |
+//! | `board-scan` | [`board`] | — |
+//! | `chores-check` | [`board`] | — |
 //!
-//! Forge steps (`gh`/`glab`), board scans, and the plugin protocol arrive in
-//! follow-up changes; the registry shape is final.
+//! The plugin protocol (`type = "python"`) arrives with the Python surface;
+//! the registry shape is final.
 
 use std::sync::Arc;
 
 use crate::registry::StepRegistry;
 
+pub mod board;
 pub mod dates;
 pub mod git;
+pub mod github;
+pub mod gitlab;
 pub mod script;
 
 /// A registry holding every builtin handler.
@@ -32,6 +42,13 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(dates::CountdownCalc));
     registry.register(Arc::new(script::Script));
     registry.register(Arc::new(script::Harness));
+    registry.register(Arc::new(github::GithubPrScan));
+    registry.register(Arc::new(gitlab::GitlabMrAuthored));
+    registry.register(Arc::new(gitlab::GitlabMrReview));
+    registry.register(Arc::new(gitlab::GitlabGroupMrs));
+    registry.register(Arc::new(gitlab::MrSlaCheck));
+    registry.register(Arc::new(board::BoardScan));
+    registry.register(Arc::new(board::ChoresCheck));
     registry
 }
 
@@ -50,6 +67,13 @@ mod tests {
             "countdown-calc",
             "script",
             "harness",
+            "github-pr-scan",
+            "gitlab-mr-authored",
+            "gitlab-mr-review",
+            "gitlab-group-mrs",
+            "mr-sla-check",
+            "board-scan",
+            "chores-check",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
