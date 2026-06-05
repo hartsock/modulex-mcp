@@ -20,6 +20,39 @@ invocation, one report.
 
 Early development. See `modulex.toml.example` for the configuration surface.
 
+## Quick start
+
+```bash
+cp modulex.toml.example ~/.modulex/config.toml   # then edit
+modulex doctor                # config path, leash, tool availability
+modulex run morning --dry-run # describe without side effects
+modulex run morning           # the real thing
+```
+
+### As an MCP server
+
+```bash
+claude mcp add modulex -- modulex-mcp
+```
+
+or in newt's `~/.newt/config.toml`:
+
+```toml
+[[mcp_servers]]
+name = "modulex"
+command = "modulex-mcp"
+```
+
+Tools: `routine_run`, `routine_list`, `step_run`, `report_get`, `steps_list`.
+Per-step failures are *data inside the report*; `isError` is reserved for
+engine faults (unknown routine, config errors, leash denial). Reports are
+identified by a monotonic generation counter, never a timestamp.
+
+```bash
+modulex-mcp --probe   # dry-run the first routine and exit (sanity check)
+modulex-mcp --tools   # print the tool specs
+```
+
 ## Design pillars
 
 - **Deterministic**: a routine is config-defined data, not agent improvisation.
