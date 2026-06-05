@@ -95,6 +95,19 @@ impl fmt::Display for Secret {
 }
 
 impl CredentialRef {
+    /// The (tilde-expanded) program a `Cmd` reference will spawn, if any.
+    /// Feeds [`crate::config::Config::declared_programs`] so the declared
+    /// default grant covers credential commands too.
+    #[must_use]
+    pub fn declared_program(&self) -> Option<String> {
+        let Self::Cmd { cmd } = self else {
+            return None;
+        };
+        let words = shell_words::split(cmd).ok()?;
+        let program = words.first()?;
+        Some(expand_tilde(program).to_string_lossy().into_owned())
+    }
+
     /// Resolve to a [`Secret`]. `Cmd` references spawn through `exec`, so
     /// they are subject to the same leash as every other subprocess.
     ///
@@ -120,6 +133,9 @@ impl CredentialRef {
                         "empty command".into(),
                     ));
                 };
+                // Same tilde expansion as declared_program(), so the leash
+                // compares like with like.
+                let program = expand_tilde(program).to_string_lossy().into_owned();
                 let out = exec
                     .spawn(crate::exec::ExecRequest::new(program).args(args.to_vec()))
                     .await
@@ -148,6 +164,59 @@ mod tests {
         assert_eq!(format!("{s:?}"), "<redacted>");
         assert_eq!(format!("{s}"), "<redacted>");
         assert_eq!(s.expose(), "hunter2");
+    }
+
+    #[test]
+    fn declared_program_extracts_cmd_argv0_only() {
+        // Regression (fresh-eyes 2026-06-05): Cmd credential programs were
+        // missing from the declared default grant, so every {cmd=..}
+        // reference was denied by the leash and its step silently skipped.
+        let cmd = CredentialRef::Cmd {
+            cmd: "pass show gitlab/token".into(),
+        };
+        assert_eq!(cmd.declared_program().as_deref(), Some("pass"));
+
+        let env = CredentialRef::Env { env: "X".into() };
+        assert_eq!(env.declared_program(), None);
+        let file = CredentialRef::File {
+            file: "~/.k".into(),
+        };
+        assert_eq!(file.declared_program(), None);
+    }
+
+    #[tokio::test]
+    async fn cmd_resolution_is_leash_gated_and_uses_stdout() {
+        use std::sync::Arc;
+
+        use agent_bridle_core::{Caveats, Scope};
+
+        use crate::exec::test_support::{gate_with, MockSpawner};
+
+        let spawner = Arc::new(MockSpawner::with_outputs(vec![MockSpawner::ok(
+            " tok-123 \n",
+        )]));
+        let granted = Caveats {
+            exec: Scope::only(["pass".to_string()]),
+            ..Caveats::top()
+        };
+        let gate = gate_with(&granted, spawner);
+
+        let secret = CredentialRef::Cmd {
+            cmd: "pass show gitlab/token".into(),
+        }
+        .resolve(&gate)
+        .await
+        .expect("granted command resolves");
+        assert_eq!(secret.expose(), "tok-123");
+
+        // An ungranted credential command is denied by the leash.
+        let denied = CredentialRef::Cmd {
+            cmd: "vault kv get x".into(),
+        }
+        .resolve(&gate)
+        .await
+        .unwrap_err();
+        assert!(denied.to_string().contains("vault"));
     }
 
     // The "Secret is not serializable" guarantee is enforced by the

@@ -291,6 +291,8 @@ impl Config {
 
     /// The union of programs every configured step declares it will spawn —
     /// the *declared default* exec grant when no explicit caveats are given.
+    /// Includes the argv0 of every `{cmd = ..}` credential reference: those
+    /// commands run through the same leash, so they need the same grant.
     #[must_use]
     pub fn declared_programs(&self, registry: &StepRegistry) -> BTreeSet<String> {
         let mut programs = BTreeSet::new();
@@ -299,6 +301,11 @@ impl Config {
                 if let Some(handler) = registry.get(&spec.step_type) {
                     programs.extend(handler.required_programs(spec));
                 }
+                programs.extend(
+                    spec.env
+                        .values()
+                        .filter_map(CredentialRef::declared_program),
+                );
             }
         }
         programs
@@ -415,6 +422,26 @@ end_date = "2026-07-15"
         assert_eq!(cfg.shared.gitlab_groups[0].per_page, 20);
         assert_eq!(cfg.deadlines[0].label, "CFP");
         assert_eq!(cfg.countdowns[0].total_work_days, 30);
+    }
+
+    #[test]
+    fn declared_programs_include_cmd_credentials() {
+        // Regression (fresh-eyes 2026-06-05): the declared default grant
+        // missed {cmd=..} credential programs, denying them at run time.
+        let cfg = Config::from_toml(
+            r#"
+[[routines.r.steps]]
+name = "s"
+type = "script"
+command = "tool"
+env = { TOKEN = { cmd = "pass show t" }, OTHER = { env = "X" } }
+"#,
+        )
+        .unwrap();
+        let declared = cfg.declared_programs(&crate::steps::builtin_registry());
+        assert!(declared.contains("tool"));
+        assert!(declared.contains("pass"));
+        assert_eq!(declared.len(), 2);
     }
 
     #[test]

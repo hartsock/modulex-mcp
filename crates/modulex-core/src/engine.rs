@@ -225,6 +225,10 @@ impl Engine {
             } else {
                 // Concurrent batch; results re-ordered to config order so the
                 // report stays deterministic.
+                let names: Vec<(String, String)> = batch
+                    .iter()
+                    .map(|s| (s.name.clone(), s.step_type.clone()))
+                    .collect();
                 let mut join = tokio::task::JoinSet::new();
                 for (index, step) in batch.into_iter().enumerate() {
                     let engine_cx = self.batch_context(opts.dry_run, generation, &exec, &prior);
@@ -233,22 +237,26 @@ impl Engine {
                         (index, run_with(handler.as_deref(), &step, &engine_cx).await)
                     });
                 }
-                let mut results: Vec<(usize, StepResult)> = Vec::new();
+                let mut slots: Vec<Option<StepResult>> = vec![None; names.len()];
                 while let Some(joined) = join.join_next().await {
-                    if let Ok(pair) = joined {
-                        results.push(pair);
+                    if let Ok((index, result)) = joined {
+                        slots[index] = Some(result);
                     }
                 }
-                results.sort_by_key(|(index, _)| *index);
-                for (_, result) in results {
-                    report.add(result);
+                for (index, slot) in slots.into_iter().enumerate() {
+                    // A panicked handler still appears in the report as a
+                    // failed step — soft-failure is a guarantee, not a habit.
+                    let (name, step_type) = &names[index];
+                    report.add(slot.unwrap_or_else(|| {
+                        StepResult::fail(name, step_type, "step task panicked")
+                    }));
                 }
             }
         }
 
         report.finalize();
         let mut reports = self.reports.lock().expect("report store poisoned");
-        if reports.len() == REPORT_RETENTION {
+        while reports.len() >= REPORT_RETENTION {
             reports.pop_front();
         }
         reports.push_back(report.clone());

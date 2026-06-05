@@ -11,7 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::config::{expand_tilde, StepSpec};
-use crate::exec::{ExecError, ExecOutput, ExecRequest};
+use crate::exec::{ExecOutput, ExecRequest};
 use crate::report::StepResult;
 use crate::step::{resolve_step_env, RunContext, StepHandler};
 
@@ -52,13 +52,10 @@ async fn run_command(spec: &StepSpec, cx: &RunContext) -> Result<ExecOutput, Ste
         .env(env)
         .timeout(Duration::from_secs(spec.timeout));
 
-    match cx.exec.spawn(request).await {
-        Ok(out) => Ok(out),
-        Err(e @ ExecError::Denied(_)) => {
-            Err(StepResult::fail(&spec.name, &spec.step_type, e.to_string()))
-        }
-        Err(e) => Err(StepResult::fail(&spec.name, &spec.step_type, e.to_string())),
-    }
+    cx.exec
+        .spawn(request)
+        .await
+        .map_err(|e| StepResult::fail(&spec.name, &spec.step_type, e.to_string()))
 }
 
 fn describe(spec: &StepSpec) -> String {
