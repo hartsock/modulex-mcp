@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logos/modulex_logo_256x256.png" alt="modulex logo" width="160" />
+</p>
+
 # modulex
 
 **A deterministic, pluggable routine engine for agents — CLI + MCP server.**
