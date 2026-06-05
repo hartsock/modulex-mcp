@@ -1,0 +1,102 @@
+# modulex example configuration — the good-morning routine.
+#
+# Search order: $MODULEX_CONFIG → ./modulex.toml → ~/.modulex/config.toml
+#
+# SECURITY: this file holds credential REFERENCES, never values.
+#   {env = "NAME"}   read from the modulex process environment
+#   {file = "path"}  read from a file (~ expanded, trimmed)
+#   {cmd = "..."}    run a command (exec-gated) and use its stdout
+#
+# Leash: without [caveats] (and without $MODULEX_CAVEATS), the exec grant
+# defaults to exactly the programs the steps below declare — nothing else
+# can be spawned.
+
+[identity]
+username = "your-forge-username"
+gitlab_host = "gitlab.example.com"
+
+[shared]
+repos = ["~/workspaces/project-a", "~/workspaces/project-b"]
+github_repos = ["you/project-a"]
+gitlab_projects = ["group/service"]
+
+[[shared.gitlab_groups]]
+name = "group"
+scan = "recent" # last 7 days; "all" = all open
+per_page = 20
+
+[board]
+path = "~/workspaces/knowledge/board"
+lanes = ["p0", "p1"]
+
+[chores]
+path = "~/workspaces/knowledge/board"
+
+[[deadlines]]
+label = "Conference CFP"
+date = "2026-07-01"
+notes = "submit abstract"
+
+[[countdowns]]
+label = "Project ramp"
+start_date = "2026-06-01"
+end_date = "2026-07-15"
+total_work_days = 30
+display = "{label}: work day {n} of {total}"
+
+# Optional explicit leash (tier 2; $MODULEX_CAVEATS JSON is tier 1):
+# [caveats]
+# fs_read = "all"
+# fs_write = "all"
+# exec = { only = ["git", "gh", "glab", "pa", "python3"] }
+# net = "all"
+# max_calls = "unlimited"
+# valid_for_generation = "all"
+
+[routines.morning]
+description = "Good morning dashboard"
+
+# --- Phase: repo health (parallel batch) ---
+
+[[routines.morning.steps]]
+name = "tend repos"
+type = "git-tend" # git fetch --all --prune && git pull --ff-only per repo
+parallel = true
+
+[[routines.morning.steps]]
+name = "working trees"
+type = "git-status"
+parallel = true
+
+[[routines.morning.steps]]
+name = "unpushed"
+type = "git-unpushed"
+parallel = true
+
+# --- Phase: deadlines & countdowns (pure) ---
+
+[[routines.morning.steps]]
+name = "deadlines"
+type = "deadline-calc"
+
+[[routines.morning.steps]]
+name = "countdowns"
+type = "countdown-calc"
+
+# --- Phase: external tools ---
+
+# An AI harness in an enclave: flags in, one JSON object out.
+[[routines.morning.steps]]
+name = "assistant briefing"
+type = "harness"
+command = "pa"
+args = ["briefing", "--json"]
+timeout = 120
+env = { PA_TOKEN = { file = "~/.keys/pa-token" } }
+
+# Any script; trimmed stdout becomes the report section.
+[[routines.morning.steps]]
+name = "weather"
+type = "script"
+command = "~/bin/weather.sh"
+timeout = 30

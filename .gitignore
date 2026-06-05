@@ -1,0 +1,5 @@
+# Cargo.lock IS committed (binaries; CI runs --locked).
+/target
+*.pyc
+__pycache__/
+/modulex.toml
