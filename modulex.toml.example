@@ -83,6 +83,39 @@ type = "deadline-calc"
 name = "countdowns"
 type = "countdown-calc"
 
+# --- Phase: review queues (parallel batch) ---
+
+[[routines.morning.steps]]
+name = "github PRs"
+type = "github-pr-scan"
+parallel = true
+env = { GH_TOKEN = { env = "GH_TOKEN" } }
+
+[[routines.morning.steps]]
+name = "review queue"
+type = "gitlab-mr-review"
+parallel = true
+env = { GITLAB_TOKEN = { cmd = "pass show gitlab/token" } }
+
+[[routines.morning.steps]]
+name = "team MRs"
+type = "gitlab-group-mrs"
+
+[[routines.morning.steps]]
+name = "MR SLA"
+type = "mr-sla-check"
+response_hours = 24
+
+# --- Phase: board & chores (pure fs scans) ---
+
+[[routines.morning.steps]]
+name = "board"
+type = "board-scan"
+
+[[routines.morning.steps]]
+name = "chores"
+type = "chores-check"
+
 # --- Phase: external tools ---
 
 # An AI harness in an enclave: flags in, one JSON object out.
