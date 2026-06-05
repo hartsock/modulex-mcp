@@ -133,3 +133,12 @@ name = "weather"
 type = "script"
 command = "~/bin/weather.sh"
 timeout = 30
+
+# A plugin under the modulex-plugin/1 contract (one JSON object stdin→stdout,
+# any language; see examples/standup_notes.py).
+[[routines.morning.steps]]
+name = "standup notes"
+type = "python"
+script = "~/.modulex/plugins/standup_notes.py"
+interpreter = "python3"
+timeout = 60

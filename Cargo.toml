@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/modulex-core", "crates/modulex-cli", "crates/modulex-mcp"]
+members = [
+    "crates/modulex-core",
+    "crates/modulex-cli",
+    "crates/modulex-mcp",
+    "crates/modulex-py",
+]
 
 [workspace.package]
 version = "0.6.20260605"

@@ -4,6 +4,8 @@
 //! request with an id, notifications get none. Dispatch is serial — MCP
 //! stdio is request/response, and routine runs are the long pole anyway.
 
+use std::sync::Arc;
+
 use modulex_core::Engine;
 use serde_json::{json, Value};
 
@@ -14,7 +16,7 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// The MCP server: an engine plus the protocol shell.
 pub struct Server {
-    engine: Engine,
+    engine: Arc<Engine>,
     version: &'static str,
 }
 
@@ -22,6 +24,14 @@ impl Server {
     /// A server over an engine.
     #[must_use]
     pub fn new(engine: Engine) -> Self {
+        Self::with_engine(Arc::new(engine))
+    }
+
+    /// A server sharing an engine with another surface (the Python bindings
+    /// run routines and serve MCP over the SAME engine, so generations and
+    /// stored reports stay continuous).
+    #[must_use]
+    pub fn with_engine(engine: Arc<Engine>) -> Self {
         Self {
             engine,
             version: env!("CARGO_PKG_VERSION"),

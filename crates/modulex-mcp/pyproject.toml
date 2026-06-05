@@ -1,0 +1,24 @@
+# PyPI bin wheel: `pip install modulex-mcp` ships the `modulex-mcp` MCP
+# server binary. bindings = "bin" — pure Rust, never links libpython.
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "modulex-mcp"
+description = "Deterministic, pluggable routine engine — stdio MCP server"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+authors = [
+    { name = "Shawn Hartsock", email = "hartsock@users.noreply.github.com" },
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/hartsock/modulex-mcp"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "modulex_mcp"
+bindings = "bin"

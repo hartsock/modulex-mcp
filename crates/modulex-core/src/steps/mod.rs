@@ -17,8 +17,7 @@
 //! | `board-scan` | [`board`] | — |
 //! | `chores-check` | [`board`] | — |
 //!
-//! The plugin protocol (`type = "python"`) arrives with the Python surface;
-//! the registry shape is final.
+//! | `python` | [`python`] | the configured interpreter (plugin protocol) |
 
 use std::sync::Arc;
 
@@ -29,6 +28,7 @@ pub mod dates;
 pub mod git;
 pub mod github;
 pub mod gitlab;
+pub mod python;
 pub mod script;
 
 /// A registry holding every builtin handler.
@@ -49,6 +49,7 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(gitlab::MrSlaCheck));
     registry.register(Arc::new(board::BoardScan));
     registry.register(Arc::new(board::ChoresCheck));
+    registry.register(Arc::new(python::PythonPlugin));
     registry
 }
 
@@ -74,6 +75,7 @@ mod tests {
             "mr-sla-check",
             "board-scan",
             "chores-check",
+            "python",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
