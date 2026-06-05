@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logos/modulex_logo_256x256.png" alt="modulex logo" width="160" />
+</p>
+
 # modulex
 
 **A deterministic, pluggable routine engine for agents — CLI + MCP server.**
@@ -19,6 +23,67 @@ invocation, one report.
 ## Status
 
 Early development. See `modulex.toml.example` for the configuration surface.
+
+## Quick start
+
+```bash
+cp modulex.toml.example ~/.modulex/config.toml   # then edit
+modulex doctor                # config path, leash, tool availability
+modulex run morning --dry-run # describe without side effects
+modulex run morning           # the real thing
+```
+
+### As an MCP server
+
+```bash
+claude mcp add modulex -- modulex-mcp
+```
+
+or in newt's `~/.newt/config.toml`:
+
+```toml
+[[mcp_servers]]
+name = "modulex"
+command = "modulex-mcp"
+```
+
+Tools: `routine_run`, `routine_list`, `step_run`, `report_get`, `steps_list`.
+Per-step failures are *data inside the report*; `isError` is reserved for
+engine faults (unknown routine, config errors, leash denial). Reports are
+identified by a monotonic generation counter, never a timestamp.
+
+```bash
+modulex-mcp --probe   # dry-run the first routine and exit (sanity check)
+modulex-mcp --tools   # print the tool specs
+```
+
+## Extending with Python
+
+Two tiers:
+
+**1. Plugin protocol** (`type = "python"`, any language, leashed subprocess):
+the engine writes one JSON object to stdin, reads one from stdout — see
+`examples/standup_notes.py` and the `modulex-plugin/1` spec in
+`crates/modulex-core/src/steps/python.rs`.
+
+**2. In-process via `modulex-py`** (`pip install modulex-py`) — Python hosts
+the engine, so Python handlers run inside routines exactly like builtins,
+including over MCP:
+
+```python
+import modulex_py
+
+engine = modulex_py.Engine.from_config()
+
+@engine.step("standup-notes")
+def standup(spec: dict, ctx: dict) -> dict:
+    return {"success": True, "output": "- shipped the leash"}
+
+report = engine.run_routine("morning", dry_run=True)
+print(report.to_text())
+
+engine.serve_stdio()   # MCP on stdio, Python steps included
+```
 
 ## Design pillars
 

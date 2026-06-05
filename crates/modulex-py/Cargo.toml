@@ -1,0 +1,30 @@
+[package]
+name = "modulex-py"
+description = "Python bindings for the modulex routine engine — embed it, register Python step handlers, serve MCP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+# Ships ONLY as a PyPI wheel (maturin); never to crates.io.
+publish = false
+
+[lib]
+# `import modulex_py` loads this native extension module directly.
+name = "modulex_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+async-trait = { workspace = true }
+modulex-core = { workspace = true }
+modulex-mcp = { path = "../modulex-mcp", version = "=0.6.20260605" }
+serde_json = { workspace = true }
+
+# Extension-module: does not link libpython (the inverse-embedding trick —
+# Python hosts the engine; the Rust bin wheels stay libpython-free).
+pyo3 = { version = "0.28", features = ["extension-module"] }
+
+# One shared runtime bridges the engine's async surface to Python's
+# synchronous call boundary.
+tokio = { workspace = true }

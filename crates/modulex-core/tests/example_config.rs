@@ -16,15 +16,16 @@ fn example_config_parses() {
 fn example_declares_only_expected_programs() {
     let config = Config::from_toml(EXAMPLE).unwrap();
     let declared = config.declared_programs(&builtin_registry());
-    assert!(declared.contains("git"));
-    assert!(declared.contains("pa"));
+    for expected in ["git", "gh", "glab", "pa", "pass", "python3"] {
+        assert!(declared.contains(expected), "declared: {declared:?}");
+    }
     // The script step's command is declared with ~ expanded.
     assert!(
         declared.iter().any(|p| p.ends_with("bin/weather.sh")),
         "declared: {declared:?}"
     );
     // Pure steps declare nothing extra; no stray entries.
-    assert_eq!(declared.len(), 3, "declared: {declared:?}");
+    assert_eq!(declared.len(), 7, "declared: {declared:?}");
 }
 
 #[test]
