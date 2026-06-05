@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
+# When editing this file, verify it still matches the pipeline (and vice
+# versa — pipeline edits REQUIRE a hook audit; see CLAUDE.md).
+set -euo pipefail
+
+echo "pre-push: cargo fmt --check"
+cargo fmt -- --check
+
+echo "pre-push: cargo clippy (zero warnings)"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "pre-push: cargo test"
+cargo test --all
+
+echo "pre-push: all checks passed"
