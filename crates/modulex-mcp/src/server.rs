@@ -252,6 +252,7 @@ type = "reminders"
                 "tool_search",
                 "tool_describe",
                 "tool_invoke",
+                "routine_eval",
             ],
             "the DEFAULT index (progressive disclosure) — classic store tools \
              are discoverable + callable but unlisted"
@@ -368,6 +369,105 @@ type = "reminders"
             .await
             .unwrap();
         assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn routine_eval_runs_inline_steps_under_the_same_leash() {
+        let s = server(vec![ok_out("inline says hi\n")]);
+        // A two-step inline routine: a granted script + a pure date step.
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 90, "method": "tools/call",
+                "params": { "name": "routine_eval", "arguments": {
+                    "steps": [
+                        { "name": "greet", "type": "script", "command": "sh",
+                          "args": ["-c", "echo hi"] },
+                        { "name": "dl", "type": "deadline-calc" }
+                    ],
+                    "format": "data"
+                } }
+            }))
+            .await
+            .unwrap();
+        assert!(resp["result"].get("isError").is_none(), "{resp}");
+        let report: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(report["routine"], "eval");
+        assert_eq!(report["generation"], 1, "evals are generation-stamped runs");
+        assert_eq!(report["steps"][0]["data"]["exit_code"], 0);
+        assert_eq!(report["steps"][1]["type"], "deadline-calc");
+
+        // The stored report is fetchable like any run.
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 91, "method": "tools/call",
+                "params": { "name": "report_get",
+                            "arguments": { "generation": 1, "format": "json" } }
+            }))
+            .await
+            .unwrap();
+        let stored: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(stored["routine"], "eval");
+    }
+
+    #[tokio::test]
+    async fn routine_eval_cannot_widen_authority() {
+        // The engine's grant was fixed at build (declared programs of the
+        // CONFIG). An inline step naming an ungranted program is denied by
+        // the leash — a soft step failure carrying the denial reason.
+        let s = server(vec![]);
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 92, "method": "tools/call",
+                "params": { "name": "routine_eval", "arguments": {
+                    "steps": [ { "name": "sneak", "type": "script",
+                                 "command": "curl", "args": ["http://evil"] } ],
+                    "format": "data"
+                } }
+            }))
+            .await
+            .unwrap();
+        assert!(
+            resp["result"].get("isError").is_none(),
+            "soft failure, not fault"
+        );
+        let report: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(report["success"], false);
+        assert!(report["steps"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("granted authority"));
+    }
+
+    #[tokio::test]
+    async fn routine_eval_validates_its_input() {
+        let s = server(vec![]);
+        for (args, marker) in [
+            (json!({}), "requires a `steps` array"),
+            (json!({ "steps": [] }), "must not be empty"),
+            (
+                json!({ "steps": [ { "type": "script" } ] }), // missing name
+                "not a valid step spec",
+            ),
+        ] {
+            let resp = s
+                .handle(&json!({
+                    "jsonrpc": "2.0", "id": 93, "method": "tools/call",
+                    "params": { "name": "routine_eval", "arguments": args }
+                }))
+                .await
+                .unwrap();
+            assert_eq!(resp["result"]["isError"], true);
+            assert!(
+                resp["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(marker),
+                "expected {marker:?} in {resp}"
+            );
+        }
     }
 
     #[tokio::test]

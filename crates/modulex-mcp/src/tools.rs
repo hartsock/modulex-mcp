@@ -570,6 +570,49 @@ fn h_tool_invoke<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
+/// Inline routines are bounded — a runaway composer hits this, not the OS.
+const EVAL_MAX_STEPS: usize = 32;
+
+fn h_routine_eval<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let Some(raw_steps) = args.get("steps").and_then(Value::as_array) else {
+            return ToolOutcome::err("routine_eval requires a `steps` array");
+        };
+        if raw_steps.is_empty() {
+            return ToolOutcome::err("routine_eval: `steps` must not be empty");
+        }
+        if raw_steps.len() > EVAL_MAX_STEPS {
+            return ToolOutcome::err(format!(
+                "routine_eval: at most {EVAL_MAX_STEPS} steps per eval ({} given)",
+                raw_steps.len()
+            ));
+        }
+        let mut steps = Vec::with_capacity(raw_steps.len());
+        for (index, raw) in raw_steps.iter().enumerate() {
+            match serde_json::from_value::<modulex_core::StepSpec>(raw.clone()) {
+                Ok(step) => steps.push(step),
+                Err(e) => {
+                    return ToolOutcome::err(format!(
+                        "routine_eval: steps[{index}] is not a valid step spec: {e}"
+                    ))
+                }
+            }
+        }
+        let opts = RunOptions {
+            only: Vec::new(),
+            skip: Vec::new(),
+            dry_run: args
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        };
+        match cx.engine.run_inline(steps, opts).await {
+            Ok(report) => ToolOutcome::ok(render(&report, args)),
+            Err(e) => engine_fault(&e),
+        }
+    })
+}
+
 // ── the registry ───────────────────────────────────────────────────────
 
 /// The default-surface budget (#32): the number of tools the DEFAULT facet
@@ -902,6 +945,36 @@ fn build_registry() -> ToolRegistry {
         },
         ToolEntry {
             spec: ToolSpec {
+                name: "routine_eval",
+                description: "Run an INLINE routine: an ad-hoc array of step specs \
+                    with identical semantics to a config routine — same leash (an \
+                    inline step can never use a program outside the engine's grant), \
+                    same soft failures, generation-stamped report stored as 'eval'. \
+                    Compose multi-step queries instead of wishing for more tools. \
+                    Step shape: {name, type, ...type-specific params} — see \
+                    steps_list for types and their data schemas.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": { "type": "object",
+                                       "description": "a step spec: {name, type, ...params}" },
+                            "minItems": 1,
+                            "maxItems": 32
+                        },
+                        "dry_run": { "type": "boolean", "default": false },
+                        "format": format_property()
+                    },
+                    "required": ["steps"]
+                }),
+                mutates: true, // executes arbitrary (leashed) configured work
+                facet: "core",
+            },
+            handler: h_routine_eval,
+        },
+        ToolEntry {
+            spec: ToolSpec {
                 name: "store_export",
                 description: "Export the whole agent state store as plain JSON \
                     (sovereignty: the content is never locked into SQLite).",
@@ -944,6 +1017,7 @@ mod tests {
             ("tool_search", false, "core"),
             ("tool_describe", false, "core"),
             ("tool_invoke", true, "core"),
+            ("routine_eval", true, "core"),
             ("store_export", false, "store-classic"),
         ];
         let actual: Vec<(&str, bool, &str)> = registry()
@@ -987,6 +1061,7 @@ mod tests {
                 "tool_search",
                 "tool_describe",
                 "tool_invoke",
+                "routine_eval",
             ],
             "the default index changed — a deliberate, reviewed event"
         );

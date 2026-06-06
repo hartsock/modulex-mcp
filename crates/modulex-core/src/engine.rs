@@ -241,7 +241,37 @@ impl Engine {
         routine: &str,
         opts: RunOptions,
     ) -> Result<Report, EngineError> {
-        let spec = self.routine_spec(routine)?.clone();
+        let steps = self.routine_spec(routine)?.steps.clone();
+        self.run_steps(routine, steps, opts).await
+    }
+
+    /// Run an INLINE routine: an ad-hoc steps list with identical semantics
+    /// to a config routine — same leash (the grant was fixed at engine
+    /// build, so inline steps can never widen authority; out-of-grant
+    /// programs are denied per step), same soft failures, same
+    /// generation-stamped report (stored under the routine name `"eval"`).
+    ///
+    /// # Errors
+    /// [`EngineError::Denied`] when the leash refuses the run.
+    pub async fn run_inline(
+        &self,
+        steps: Vec<StepSpec>,
+        opts: RunOptions,
+    ) -> Result<Report, EngineError> {
+        self.run_steps("eval", steps, opts).await
+    }
+
+    /// The shared run path for config and inline routines.
+    async fn run_steps(
+        &self,
+        routine: &str,
+        steps: Vec<StepSpec>,
+        opts: RunOptions,
+    ) -> Result<Report, EngineError> {
+        let spec = crate::config::RoutineSpec {
+            description: String::new(),
+            steps,
+        };
 
         // The run's causal coordinate, and the single leash authorization.
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
