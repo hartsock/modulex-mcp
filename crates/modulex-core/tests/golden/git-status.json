@@ -1,0 +1,36 @@
+{
+  "properties": {
+    "repos": {
+      "items": {
+        "properties": {
+          "detail": {
+            "description": "short-status lines when dirty; error text on error",
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "clean",
+              "dirty",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "state",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "repos"
+  ],
+  "type": "object"
+}

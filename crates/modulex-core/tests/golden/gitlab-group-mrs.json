@@ -1,0 +1,37 @@
+{
+  "properties": {
+    "targets": {
+      "items": {
+        "properties": {
+          "raw": {
+            "description": "verbatim CLI output (ok) or error text",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "none",
+              "auth-failed",
+              "error"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "state",
+          "raw"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "targets"
+  ],
+  "type": "object"
+}

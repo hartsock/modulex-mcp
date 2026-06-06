@@ -134,6 +134,18 @@ impl StepHandler for PythonPlugin {
         "python"
     }
 
+    fn description(&self) -> &'static str {
+        "Run a plugin script under the modulex-plugin/1 stdio JSON contract"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        // Passthrough: the plugin owns its `data` payload (the protocol's
+        // `data` field). Empty schema = any JSON.
+        serde_json::json!({
+            "description": "plugin-defined payload (modulex-plugin/1 `data` field)"
+        })
+    }
+
     fn required_programs(&self, spec: &StepSpec) -> Vec<String> {
         vec![spec
             .param_str("interpreter")

@@ -19,6 +19,35 @@ impl StepHandler for Reminders {
         "reminders"
     }
 
+    fn description(&self) -> &'static str {
+        "Open reminders from the agent state store, overdue first"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["reminders", "open"],
+            "properties": {
+                "reminders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "text", "created_gen"],
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "text": { "type": "string" },
+                            "due": { "type": ["string", "null"] },
+                            "recurrence": { "type": ["string", "null"] },
+                            "created_gen": { "type": "integer" },
+                            "done_gen": { "type": ["integer", "null"] }
+                        }
+                    }
+                },
+                "open": { "type": "integer", "minimum": 0 }
+            }
+        })
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec![]
     }
@@ -37,7 +66,13 @@ impl StepHandler for Reminders {
         match store.reminders_open() {
             Ok(reminders) => {
                 let today = chrono::Local::now().date_naive();
-                StepResult::ok(&spec.name, &spec.step_type, render(&reminders, today))
+                let mut result =
+                    StepResult::ok(&spec.name, &spec.step_type, render(&reminders, today));
+                result.data = Some(serde_json::json!({
+                    "open": reminders.len(),
+                    "reminders": reminders,
+                }));
+                result
             }
             Err(e) => StepResult::fail(&spec.name, &spec.step_type, e.to_string()),
         }

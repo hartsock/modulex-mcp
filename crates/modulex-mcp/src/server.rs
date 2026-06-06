@@ -397,6 +397,32 @@ type = "reminders"
     }
 
     #[tokio::test]
+    async fn format_data_returns_structured_payloads_only() {
+        // The agent-native view (data contract): typed payloads, no prose.
+        let s = server(vec![ok_out("hi\n")]);
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": { "name": "routine_run",
+                            "arguments": { "routine": "morning", "format": "data" } }
+            }))
+            .await
+            .unwrap();
+        let report: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(report["generation"], 1);
+        let steps = report["steps"].as_array().unwrap();
+        // script step carries its typed exit_code, not markdown
+        let greeting = &steps[0];
+        assert_eq!(greeting["type"], "script");
+        assert_eq!(greeting["data"]["exit_code"], 0);
+        assert!(greeting.get("output").is_none(), "no prose in data view");
+        // deadline step carries the typed empty contract
+        let deadlines = &steps[1];
+        assert_eq!(deadlines["data"]["deadlines"], json!([]));
+    }
+
+    #[tokio::test]
     async fn unknown_routine_is_an_engine_fault_with_is_error() {
         let s = server(vec![]);
         let resp = s
@@ -482,9 +508,14 @@ type = "reminders"
             .unwrap();
         let payload: Value =
             serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        let types = payload["step_types"].as_array().unwrap();
-        assert!(types.iter().any(|t| t == "script"));
-        assert!(types.iter().any(|t| t == "harness"));
+        let steps = payload["steps"].as_array().unwrap();
+        let script = steps
+            .iter()
+            .find(|s| s["type"] == "script")
+            .expect("script registered");
+        assert!(script["description"].as_str().unwrap().contains("command"));
+        assert!(script["data_schema"]["properties"]["exit_code"].is_object());
+        assert!(steps.iter().any(|s| s["type"] == "harness"));
     }
 
     #[tokio::test]

@@ -93,6 +93,31 @@ async fn run_glab(
     )
 }
 
+/// Shared schema for the glab-backed steps: per-target raw passthrough with
+/// a state enum (glab output is human text; `raw` carries it verbatim).
+fn targets_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["targets"],
+        "properties": {
+            "targets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["target", "state", "raw"],
+                    "properties": {
+                        "target": { "type": "string" },
+                        "state": { "type": "string",
+                                   "enum": ["ok", "none", "auth-failed", "error"] },
+                        "raw": { "type": "string",
+                                 "description": "verbatim CLI output (ok) or error text" }
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Aggregate per-project results with the all-auth-failed soft skip.
 fn aggregate(
     spec: &StepSpec,
@@ -137,7 +162,21 @@ fn aggregate(
         empty_message.to_string()
     };
 
-    StepResult::ok(&spec.name, &spec.step_type, body).with_repos(repo_results)
+    let targets: Vec<serde_json::Value> = repo_results
+        .iter()
+        .map(|rr| {
+            let (state, raw) = match &rr.error {
+                Some(e) if e.contains(AUTH_FAILED) => ("auth-failed", e.clone()),
+                Some(e) => ("error", e.clone()),
+                None if rr.output == "(none)" => ("none", String::new()),
+                None => ("ok", rr.output.clone()),
+            };
+            serde_json::json!({ "target": rr.repo, "state": state, "raw": raw })
+        })
+        .collect();
+    let mut result = StepResult::ok(&spec.name, &spec.step_type, body).with_repos(repo_results);
+    result.data = Some(serde_json::json!({ "targets": targets }));
+    result
 }
 
 /// Shared shape of the authored/review steps (only the role flag differs).
@@ -203,6 +242,14 @@ impl StepHandler for GitlabMrAuthored {
         "gitlab-mr-authored"
     }
 
+    fn description(&self) -> &'static str {
+        "Open merge requests the user authored, per project"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        targets_schema()
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec!["glab".into()]
     }
@@ -219,6 +266,14 @@ pub struct GitlabMrReview;
 impl StepHandler for GitlabMrReview {
     fn type_name(&self) -> &'static str {
         "gitlab-mr-review"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open merge requests where the user is a reviewer, per project"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        targets_schema()
     }
 
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
@@ -238,6 +293,14 @@ pub struct GitlabGroupMrs;
 impl StepHandler for GitlabGroupMrs {
     fn type_name(&self) -> &'static str {
         "gitlab-group-mrs"
+    }
+
+    fn description(&self) -> &'static str {
+        "Recent merge-request activity across configured groups"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        targets_schema()
     }
 
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
@@ -303,6 +366,21 @@ impl StepHandler for MrSlaCheck {
         "mr-sla-check"
     }
 
+    fn description(&self) -> &'static str {
+        "Pending review-request count from this run, against an SLA threshold"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["threshold_hours", "pending_targets"],
+            "properties": {
+                "threshold_hours": { "type": "integer" },
+                "pending_targets": { "type": "integer", "minimum": 0 }
+            }
+        })
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec![] // reads prior results; spawns nothing
     }
@@ -336,7 +414,11 @@ impl StepHandler for MrSlaCheck {
                  a response today."
             )
         };
-        StepResult::ok(&spec.name, &spec.step_type, body)
+        let mut result = StepResult::ok(&spec.name, &spec.step_type, body);
+        result.data = Some(serde_json::json!({
+            "threshold_hours": hours, "pending_targets": pending,
+        }));
+        result
     }
 }
 

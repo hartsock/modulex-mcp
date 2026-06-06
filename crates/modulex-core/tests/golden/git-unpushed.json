@@ -1,0 +1,37 @@
+{
+  "properties": {
+    "repos": {
+      "items": {
+        "properties": {
+          "detail": {
+            "description": "oneline commit list when unpushed",
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "all-pushed",
+              "unpushed",
+              "no-upstream",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "state",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "repos"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,16 @@
+{
+  "properties": {
+    "pending_targets": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "threshold_hours": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "threshold_hours",
+    "pending_targets"
+  ],
+  "type": "object"
+}

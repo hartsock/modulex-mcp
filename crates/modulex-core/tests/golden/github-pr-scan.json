@@ -1,0 +1,57 @@
+{
+  "properties": {
+    "repos": {
+      "items": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "prs": {
+            "items": {
+              "properties": {
+                "author": {
+                  "type": "string"
+                },
+                "number": {
+                  "type": "integer"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "number",
+                "title",
+                "author"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "auth-failed",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "state",
+          "prs"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "repos"
+  ],
+  "type": "object"
+}
