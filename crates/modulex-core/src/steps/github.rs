@@ -275,6 +275,8 @@ mod tests {
         toml::from_str("name=\"prs\"\ntype=\"github-pr-scan\"").unwrap()
     }
 
+    // FIXTURE-SYNC (#36): the JSON below mimics `gh pr list --json` output;
+    // verified against the real CLI by live_contract::live_gh_pr_list_json_shape.
     #[tokio::test]
     async fn renders_pr_lines_from_gh_json() {
         let (cx, spawner) = cx_with(vec![MockSpawner::ok(

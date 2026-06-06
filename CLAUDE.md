@@ -45,7 +45,10 @@ Standing law from it:
    for engine faults (bad config, unknown routine, leash denial of the run).
 6. **Unit tests never spawn real processes.** Use
    `exec::test_support::MockSpawner`. Real-subprocess coverage lives in the
-   dedicated gated integration test only.
+   dedicated gated integration test plus the opt-in live-contract tier
+   (`just live-test`, `MODULEX_LIVE_TESTS=1`) which verifies mock fixtures
+   against real tools — mock fixtures mimicking a real CLI carry a
+   FIXTURE-SYNC comment citing their live test.
 
 ## Build & validate
 

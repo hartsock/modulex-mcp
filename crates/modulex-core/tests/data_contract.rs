@@ -175,6 +175,9 @@ async fn executed_step_data_validates_against_schema() {
         .caveats;
 
     // Scripted outputs, in step order (git fan-outs consume one per repo).
+    // FIXTURE-SYNC (#36): these strings mimic real tools; their shapes are
+    // verified by tests/live_contract.rs (git states, gh --json fields,
+    // harness stdout contract). Change a fixture → re-check its live test.
     let outputs = vec![
         MockSpawner::ok("Already up to date.\n"),     // tend: fetch
         MockSpawner::ok("Already up to date.\n"),     // tend: pull

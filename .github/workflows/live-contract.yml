@@ -1,0 +1,25 @@
+# HOOK PARITY note: this workflow is the OPT-IN tier-3 live-contract run
+# (#36) — deliberately host-dependent, never part of PR CI (ci.yml is the
+# host-independent gate mirrored by .githooks/pre-push). Scheduled so mock
+# fixture drift against real CLIs surfaces on a cadence, not at 7am.
+name: Live contract
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1" # weekly, Monday
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Live-contract tests (tools present on the runner run; absent skip)
+        env:
+          MODULEX_LIVE_TESTS: "1"
+          # gh is preinstalled on GitHub runners; authenticate it with the
+          # workflow token so the gh --json shape test runs.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo test -p modulex-core --test live_contract -- --nocapture
