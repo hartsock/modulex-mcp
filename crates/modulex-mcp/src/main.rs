@@ -42,7 +42,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     if cli.tools {
-        println!("{}", modulex_mcp::tools::tool_specs());
+        // The full registry view (every facet) — introspection, not the
+        // budgeted index a client sees.
+        let everything = modulex_mcp::FacetPolicy::resolve(
+            Some("core,store,store-classic"),
+            &modulex_core::config::McpConfig::default(),
+        );
+        println!("{}", modulex_mcp::tools::registry().specs_json(&everything));
         return Ok(());
     }
 
@@ -57,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("{}", granted.banner());
 
     let server = Server::new(Engine::new(config, registry, granted.caveats));
+    eprintln!("{}", server.policy().banner());
 
     if cli.probe {
         let Some((routine, _, _)) = server.engine().list_routines().into_iter().next() else {

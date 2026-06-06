@@ -44,6 +44,17 @@ end_date = "2026-07-15"
 total_work_days = 30
 display = "{label}: work day {n} of {total}"
 
+# Optional MCP tool exposure (progressive disclosure). Without [mcp] the
+# default index is exposed: core (run/list/report/discovery) + the store
+# dispatch trio — ≤12 tools, CI-pinned. The classic per-record store tools
+# (reminder_add, watch_add, ...) live in the "store-classic" facet:
+# unlisted but discoverable via tool_search and callable via tool_invoke.
+# $MODULEX_TOOLS="core,store,store-classic" overrides; `deny` kills a facet
+# entirely (unlisted, undiscoverable, uncallable).
+# [mcp]
+# expose = ["core", "store", "store-classic"]
+# deny = []
+
 # Optional explicit leash (tier 2; $MODULEX_CAVEATS JSON is tier 1):
 # [caveats]
 # fs_read = "all"
