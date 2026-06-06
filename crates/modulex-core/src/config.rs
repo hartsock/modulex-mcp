@@ -329,6 +329,7 @@ impl Config {
             for spec in &routine.steps {
                 if let Some(handler) = registry.get(&spec.step_type) {
                     programs.extend(handler.required_programs(spec));
+                    programs.extend(handler.optional_programs(spec));
                 }
                 programs.extend(
                     spec.env

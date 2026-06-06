@@ -55,8 +55,17 @@ pub trait StepHandler: Send + Sync {
 
     /// The external programs this step will spawn for `spec` (e.g. `["git"]`).
     /// Drives the declared-default exec grant and the engine's soft-skip
-    /// probe. Pure steps return an empty list.
+    /// probe (ALL must be present or the step skips). Pure steps return an
+    /// empty list.
     fn required_programs(&self, spec: &StepSpec) -> Vec<String>;
+
+    /// Programs this step MAY spawn but does not require — fallback chains
+    /// (e.g. a GPU probe trying `nvidia-smi`, then `lspci`). They join the
+    /// declared-default exec grant but are NOT skip-probed; the handler
+    /// degrades gracefully when one is absent.
+    fn optional_programs(&self, _spec: &StepSpec) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Execute the step. Step-level failure is encoded in the returned
     /// [`StepResult`] (`success: false` / `skipped: true`) — handlers do not

@@ -13,4 +13,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 echo "pre-push: cargo test"
 cargo test --all
 
+echo "pre-push: lean build (no plugins)"
+cargo check -p modulex-cli --no-default-features
+cargo check -p modulex-mcp --no-default-features
+
 echo "pre-push: all checks passed"

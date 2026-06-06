@@ -1,0 +1,38 @@
+{
+  "properties": {
+    "mounts": {
+      "items": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "mount": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "warn",
+              "critical",
+              "error"
+            ],
+            "type": "string"
+          },
+          "used_percent": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mount",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "mounts"
+  ],
+  "type": "object"
+}

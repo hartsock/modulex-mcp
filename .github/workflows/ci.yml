@@ -22,3 +22,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all --locked
+      - name: Lean build (no plugins — FOUNDATION pillar C)
+        run: |
+          cargo check -p modulex-cli --no-default-features --locked
+          cargo check -p modulex-mcp --no-default-features --locked
