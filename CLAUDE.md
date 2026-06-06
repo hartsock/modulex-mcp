@@ -80,9 +80,11 @@ comments — keep them.
 | `crates/modulex-mcp` | stdio MCP server (JSON-RPC 2.0, protocol 2024-11-05) — PR 2 |
 | `crates/modulex-py` | PyO3: embed the engine, register Python step handlers, `serve_stdio()` — PR 4 |
 
-Step semantics are ported from gilabot's `gila-plugin-morning`
-(`~/workspaces/gilabot/gila-plugin-morning/gila_plugin_morning/handlers.py`) —
-treat that as the behavioral reference when in doubt.
+Step semantics (per-repo fan-out, soft auth skips, `(clean)`/`(none)`
+placeholders, report shapes) are deliberate and covered by tests — treat the
+test suite as the behavioral reference when in doubt. Describe features on
+their own terms; do not reference external/private projects in this repo's
+docs, issues, or commit messages.
 
 Caveats vocabulary (`Caveats`, `Scope`, `CountBound`) is canonical in
 `agent-mesh-protocol`, consumed via `agent-bridle-core` re-exports. The
