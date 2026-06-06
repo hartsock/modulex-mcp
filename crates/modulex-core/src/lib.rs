@@ -32,6 +32,7 @@ pub mod registry;
 pub mod report;
 pub mod step;
 pub mod steps;
+pub mod store;
 
 pub use caveats::{CaveatsSource, GrantedCaveats};
 pub use config::{Config, RoutineSpec, StepSpec};
@@ -41,6 +42,7 @@ pub use exec::{ExecGate, ExecOutput, ExecRequest, Spawner, TokioSpawner};
 pub use registry::StepRegistry;
 pub use report::{RepoResult, Report, StepResult};
 pub use step::{RunContext, StepHandler};
+pub use store::Store;
 
 // Re-export the leash vocabulary so embedders don't need a direct
 // agent-bridle-core dependency to construct grants.

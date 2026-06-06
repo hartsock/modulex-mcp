@@ -23,6 +23,9 @@ pub struct RunContext {
     /// Results of steps that completed earlier in this run, in config order.
     /// Derived steps (e.g. an SLA check over a review-queue step) read these.
     pub prior: Vec<StepResult>,
+    /// The agent state store, when available. Store-backed steps soft-skip
+    /// without it.
+    pub store: Option<std::sync::Arc<crate::store::Store>>,
 }
 
 /// A step implementation, registered in a [`crate::registry::StepRegistry`]

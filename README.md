@@ -12,6 +12,16 @@ structured report. The same routine runs identically from a terminal, from
 Claude Code, from newt-agent, or from any other MCP client — deterministically,
 with no credentials in config and every subprocess gated by a capability leash.
 
+**Why it exists:** every MCP server bloats by default — tool schemas flood
+agent context, agents end up string-matching prose, and features pile into a
+monolith. Modulex is built so that *cannot happen*: a versioned **data
+contract** (agents never parse prose), **progressive disclosure** (the
+default tool surface is ≤ 12 entries forever, CI-pinned; everything else is
+discovered at the moment of need), and a **declared-authority plugin model**
+(capability arrives as feature-gated step types, not core patches). Agent
+cost stays constant while capability grows — **by construction, not by
+vigilance**. See [docs/FOUNDATION.md](docs/FOUNDATION.md).
+
 The flagship routine is the **good-morning dashboard**: tend your repos, count
 your deadlines, scan your boards, list the reviews waiting on you — one
 invocation, one report.
@@ -22,7 +32,14 @@ invocation, one report.
 
 ## Status
 
-Early development. See `modulex.toml.example` for the configuration surface.
+Early development — the [foundation pass](docs/FOUNDATION.md) (data contract
+[#26], progressive disclosure [#32], plugin crate model [#10]) lands before
+the plugin backlog (#11–#31). See `modulex.toml.example` for the
+configuration surface.
+
+[#26]: https://github.com/hartsock/modulex-mcp/issues/26
+[#32]: https://github.com/hartsock/modulex-mcp/issues/32
+[#10]: https://github.com/hartsock/modulex-mcp/issues/10
 
 ## Quick start
 

@@ -210,6 +210,14 @@ impl ExecGate {
         Self { cx, spawner }
     }
 
+    /// The authorized [`ToolContext`] for this run — read access only.
+    /// In-proc leashed tools (the url-watch fetcher) consult its `net` axis;
+    /// the context itself remains unforgeable (minted only by the gate).
+    #[must_use]
+    pub fn tool_context(&self) -> &ToolContext {
+        &self.cx
+    }
+
     /// Leash-check, spawn, scrub. The ONLY subprocess path in modulex.
     ///
     /// # Errors

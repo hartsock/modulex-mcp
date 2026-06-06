@@ -159,6 +159,14 @@ pub struct ChoresConfig {
     pub path: String,
 }
 
+/// Agent state store location (`[store]`).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct StoreConfig {
+    /// SQLite path; empty = `$MODULEX_STORE` → `~/.modulex/store.db`.
+    #[serde(default)]
+    pub path: String,
+}
+
 /// A fixed date to count down to.
 #[derive(Clone, Debug, Deserialize)]
 pub struct DeadlineEntry {
@@ -218,6 +226,9 @@ pub struct Config {
     /// Chores config.
     #[serde(default)]
     pub chores: ChoresConfig,
+    /// Agent state store config.
+    #[serde(default)]
+    pub store: StoreConfig,
     /// Deadlines for `deadline-calc`.
     #[serde(default)]
     pub deadlines: Vec<DeadlineEntry>,

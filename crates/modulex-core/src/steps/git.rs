@@ -279,6 +279,7 @@ mod tests {
             generation: 1,
             exec: gate_with(&granted, spawner),
             prior: Vec::new(),
+            store: None,
         }
     }
 

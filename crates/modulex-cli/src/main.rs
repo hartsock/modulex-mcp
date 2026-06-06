@@ -63,6 +63,49 @@ enum Command {
     Steps,
     /// Show config location, leash provenance, and tool availability.
     Doctor,
+    /// Manage reminders in the agent state store.
+    Remind {
+        #[command(subcommand)]
+        action: RemindAction,
+    },
+    /// Agent state store utilities.
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemindAction {
+    /// Register a reminder ("remind me of X").
+    Add {
+        /// The reminder text.
+        text: String,
+        /// Optional ISO due date (YYYY-MM-DD).
+        #[arg(long)]
+        due: Option<String>,
+        /// Optional recurrence: daily | weekly | monthly.
+        #[arg(long)]
+        recur: Option<String>,
+    },
+    /// List open reminders.
+    List,
+    /// Mark a reminder done by id.
+    Done {
+        /// Reminder id (from `remind list`).
+        id: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreAction {
+    /// Export the whole store as plain JSON (sovereignty).
+    Export,
+    /// Import a previous export (appends).
+    Import {
+        /// Path to a JSON export.
+        file: PathBuf,
+    },
 }
 
 fn load(config_path: Option<&PathBuf>) -> anyhow::Result<(Engine, PathBuf, String)> {
@@ -176,6 +219,59 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
                 }
             }
             println!("routines: {}", engine.list_routines().len());
+            match engine.store() {
+                Some(_) => println!("agent state store: ok"),
+                None => println!("agent state store: UNAVAILABLE"),
+            }
+            Ok(true)
+        }
+        Command::Remind { action } => {
+            let Some(store) = engine.store() else {
+                anyhow::bail!("agent state store unavailable");
+            };
+            let generation = engine.current_generation();
+            match action {
+                RemindAction::Add { text, due, recur } => {
+                    let id =
+                        store.reminder_add(&text, due.as_deref(), recur.as_deref(), generation)?;
+                    println!("reminder #{id} registered (after gen {generation})");
+                }
+                RemindAction::List => {
+                    let reminders = store.reminders_open()?;
+                    if reminders.is_empty() {
+                        println!("(no open reminders)");
+                    }
+                    for r in reminders {
+                        let due = r.due.map(|d| format!("  due {d}")).unwrap_or_default();
+                        let recur = r
+                            .recurrence
+                            .map(|recurrence| format!("  [{recurrence}]"))
+                            .unwrap_or_default();
+                        println!("#{}  {}{due}{recur}", r.id, r.text);
+                    }
+                }
+                RemindAction::Done { id } => {
+                    if store.reminder_done(id, generation)? {
+                        println!("reminder #{id} done");
+                    } else {
+                        anyhow::bail!("no open reminder #{id}");
+                    }
+                }
+            }
+            Ok(true)
+        }
+        Command::Store { action } => {
+            let Some(store) = engine.store() else {
+                anyhow::bail!("agent state store unavailable");
+            };
+            match action {
+                StoreAction::Export => println!("{}", store.export_json()?),
+                StoreAction::Import { file } => {
+                    let json = std::fs::read_to_string(&file)?;
+                    store.import_json(&json)?;
+                    println!("imported {}", file.display());
+                }
+            }
             Ok(true)
         }
     }

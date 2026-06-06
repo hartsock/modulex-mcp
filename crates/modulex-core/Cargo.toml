@@ -9,13 +9,20 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
+default = ["web"]
+# The url-watch step: leashed fetching via agent-bridle-tool-web (net-axis
+# Caveats + SSRF screening). Off → no reqwest/rustls in the build.
+web = ["dep:agent-bridle-tool-web", "dep:blake3"]
 # Exposes exec::test_support (MockSpawner, gate_with) to downstream crates'
 # tests. Dev-dependencies only.
 test-support = []
 
 [dependencies]
 agent-bridle-core = { workspace = true }
+agent-bridle-tool-web = { workspace = true, optional = true }
 anyhow = { workspace = true }
+blake3 = { workspace = true, optional = true }
+rusqlite = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
