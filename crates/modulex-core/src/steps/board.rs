@@ -21,6 +21,31 @@ impl StepHandler for BoardScan {
         "board-scan"
     }
 
+    fn description(&self) -> &'static str {
+        "Task stems per configured board lane"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["lanes"],
+            "properties": {
+                "lanes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["lane", "found", "tasks"],
+                        "properties": {
+                            "lane": { "type": "string" },
+                            "found": { "type": "boolean", "description": "lane directory exists" },
+                            "tasks": { "type": "array", "items": { "type": "string" } }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec![]
     }
@@ -28,7 +53,10 @@ impl StepHandler for BoardScan {
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
         let board = &cx.config.board;
         if board.path.is_empty() {
-            return StepResult::ok(&spec.name, &spec.step_type, "No board path configured.");
+            let mut result =
+                StepResult::ok(&spec.name, &spec.step_type, "No board path configured.");
+            result.data = Some(serde_json::json!({ "lanes": [] }));
+            return result;
         }
         let board_path = expand_tilde(&board.path);
 
@@ -45,10 +73,14 @@ impl StepHandler for BoardScan {
         }
 
         let mut lines = Vec::new();
+        let mut data_lanes = Vec::new();
         for lane in &board.lanes {
             let lane_dir = board_path.join(lane);
             if !lane_dir.is_dir() {
                 lines.push(format!("### {lane}: (directory not found)"));
+                data_lanes.push(serde_json::json!({
+                    "lane": lane, "found": false, "tasks": [],
+                }));
                 continue;
             }
             let mut tasks: Vec<String> = std::fs::read_dir(&lane_dir)
@@ -66,12 +98,15 @@ impl StepHandler for BoardScan {
                 .unwrap_or_default();
             tasks.sort();
             lines.push(format!("### {lane} ({} tasks)", tasks.len()));
-            for task in tasks {
+            for task in &tasks {
                 lines.push(format!("  - {task}"));
             }
+            data_lanes.push(serde_json::json!({
+                "lane": lane, "found": true, "tasks": tasks,
+            }));
         }
 
-        StepResult::ok(
+        let mut result = StepResult::ok(
             &spec.name,
             &spec.step_type,
             if lines.is_empty() {
@@ -79,7 +114,9 @@ impl StepHandler for BoardScan {
             } else {
                 lines.join("\n")
             },
-        )
+        );
+        result.data = Some(serde_json::json!({ "lanes": data_lanes }));
+        result
     }
 }
 
@@ -136,6 +173,32 @@ impl StepHandler for ChoresCheck {
         "chores-check"
     }
 
+    fn description(&self) -> &'static str {
+        "Due and overdue chores from `due:` lines in the chores directory"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["overdue", "due_today", "upcoming"],
+            "properties": {
+                "overdue": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["chore", "days_overdue"],
+                        "properties": {
+                            "chore": { "type": "string" },
+                            "days_overdue": { "type": "integer", "minimum": 1 }
+                        }
+                    }
+                },
+                "due_today": { "type": "array", "items": { "type": "string" } },
+                "upcoming": { "type": "integer", "minimum": 0 }
+            }
+        })
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec![]
     }
@@ -143,7 +206,12 @@ impl StepHandler for ChoresCheck {
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
         let chores = &cx.config.chores;
         if chores.path.is_empty() {
-            return StepResult::ok(&spec.name, &spec.step_type, "No chores path configured.");
+            let mut result =
+                StepResult::ok(&spec.name, &spec.step_type, "No chores path configured.");
+            result.data = Some(serde_json::json!({
+                "overdue": [], "due_today": [], "upcoming": 0,
+            }));
+            return result;
         }
         let dir = expand_tilde(&chores.path);
 
@@ -163,9 +231,31 @@ impl StepHandler for ChoresCheck {
         }
 
         let today = chrono::Local::now().date_naive();
-        let body = render_chores(&scan_due_items(&dir), today);
-        StepResult::ok(&spec.name, &spec.step_type, body)
+        let items = scan_due_items(&dir);
+        let mut result = StepResult::ok(&spec.name, &spec.step_type, render_chores(&items, today));
+        result.data = Some(chores_data(&items, today));
+        result
     }
+}
+
+/// Typed buckets for the data contract (same bucketing as the renderer).
+fn chores_data(items: &[DueItem], today: NaiveDate) -> serde_json::Value {
+    let mut overdue = Vec::new();
+    let mut due_today = Vec::new();
+    let mut upcoming = 0usize;
+    for item in items {
+        if item.due < today {
+            overdue.push(serde_json::json!({
+                "chore": item.chore,
+                "days_overdue": (today - item.due).num_days(),
+            }));
+        } else if item.due == today {
+            due_today.push(item.chore.clone());
+        } else {
+            upcoming += 1;
+        }
+    }
+    serde_json::json!({ "overdue": overdue, "due_today": due_today, "upcoming": upcoming })
 }
 
 /// Pure renderer, factored so tests pin `today`.

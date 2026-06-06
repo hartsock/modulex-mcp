@@ -207,6 +207,36 @@ impl Report {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
+
+    /// Render the agent-native view: ONLY the structured payloads — no
+    /// markdown bodies, no per-repo prose. The data contract's `format:
+    /// "data"` surface (FOUNDATION pillar A).
+    #[must_use]
+    pub fn to_data_json(&self) -> String {
+        let steps: Vec<serde_json::Value> = self
+            .step_results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.step_name,
+                    "type": r.step_type,
+                    "success": r.success,
+                    "skipped": r.skipped,
+                    "error": r.error,
+                    "data": r.data,
+                })
+            })
+            .collect();
+        serde_json::to_string(&serde_json::json!({
+            "generation": self.generation,
+            "routine": self.routine,
+            "dry_run": self.dry_run,
+            "success": self.success,
+            "summary": self.summary,
+            "steps": steps,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    }
 }
 
 #[cfg(test)]

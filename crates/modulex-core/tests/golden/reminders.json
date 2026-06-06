@@ -1,0 +1,53 @@
+{
+  "properties": {
+    "open": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "reminders": {
+      "items": {
+        "properties": {
+          "created_gen": {
+            "type": "integer"
+          },
+          "done_gen": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "due": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer"
+          },
+          "recurrence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "created_gen"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "reminders",
+    "open"
+  ],
+  "type": "object"
+}

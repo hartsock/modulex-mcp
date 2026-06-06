@@ -43,6 +43,9 @@ enum Command {
         /// Emit the report as compact JSON instead of markdown.
         #[arg(long)]
         json: bool,
+        /// Emit ONLY the structured data payloads (the agent-native view).
+        #[arg(long, conflicts_with = "json")]
+        data: bool,
     },
     /// Run a single step of a routine (debugging aid).
     Step {
@@ -56,6 +59,9 @@ enum Command {
         /// Emit JSON.
         #[arg(long)]
         json: bool,
+        /// Emit ONLY the structured data payloads (the agent-native view).
+        #[arg(long, conflicts_with = "json")]
+        data: bool,
     },
     /// List configured routines.
     List,
@@ -120,8 +126,10 @@ fn load(config_path: Option<&PathBuf>) -> anyhow::Result<(Engine, PathBuf, Strin
     Ok((Engine::new(config, registry, granted.caveats), path, banner))
 }
 
-fn print_report(report: &modulex_core::Report, json: bool) {
-    if json {
+fn print_report(report: &modulex_core::Report, json: bool, data: bool) {
+    if data {
+        println!("{}", report.to_data_json());
+    } else if json {
         println!("{}", report.to_json());
     } else {
         println!("{}", report.to_text());
@@ -158,6 +166,7 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
             skip,
             dry_run,
             json,
+            data,
         } => {
             eprintln!("{banner}");
             let report = engine
@@ -170,7 +179,7 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
                     },
                 )
                 .await?;
-            print_report(&report, json);
+            print_report(&report, json, data);
             Ok(report.success)
         }
         Command::Step {
@@ -178,10 +187,11 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
             step,
             dry_run,
             json,
+            data,
         } => {
             eprintln!("{banner}");
             let report = engine.run_step(&routine, &step, dry_run).await?;
-            print_report(&report, json);
+            print_report(&report, json, data);
             Ok(report.success)
         }
         Command::List => {

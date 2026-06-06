@@ -1,0 +1,59 @@
+{
+  "properties": {
+    "repos": {
+      "items": {
+        "properties": {
+          "detail": {
+            "description": "last pull line on ok; failure reason otherwise",
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "no-tracking",
+              "diverged",
+              "fetch-failed",
+              "pull-failed",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "state",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "properties": {
+        "failed": {
+          "type": "integer"
+        },
+        "tended": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tended",
+        "failed",
+        "total"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "repos",
+    "summary"
+  ],
+  "type": "object"
+}

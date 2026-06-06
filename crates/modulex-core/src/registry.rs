@@ -40,6 +40,23 @@ impl StepRegistry {
     pub fn type_names(&self) -> Vec<String> {
         self.handlers.keys().cloned().collect()
     }
+
+    /// Full specs for every registered step type, sorted by name:
+    /// `(type_name, description, data_schema)` — the machine-readable step
+    /// surface (FOUNDATION pillar A).
+    #[must_use]
+    pub fn specs(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.handlers
+            .values()
+            .map(|h| {
+                (
+                    h.type_name().to_string(),
+                    h.description().to_string(),
+                    h.data_schema(),
+                )
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -56,6 +73,12 @@ mod tests {
     impl StepHandler for Fake {
         fn type_name(&self) -> &'static str {
             self.0
+        }
+        fn description(&self) -> &'static str {
+            "fake"
+        }
+        fn data_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
         }
         fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
             vec![]

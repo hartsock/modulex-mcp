@@ -18,7 +18,7 @@ use agent_bridle_core::{Caveats, Gate, Tool, ToolContext, ToolResult};
 use async_trait::async_trait;
 
 use crate::config::{Config, StepSpec};
-use crate::exec::{program_available, ExecGate, Spawner, TokioSpawner};
+use crate::exec::{ExecGate, Spawner, TokioSpawner};
 use crate::registry::StepRegistry;
 use crate::report::{Report, StepResult};
 use crate::step::RunContext;
@@ -174,6 +174,12 @@ impl Engine {
     #[must_use]
     pub fn step_types(&self) -> Vec<String> {
         self.registry.type_names()
+    }
+
+    /// Machine-readable step specs: `(type_name, description, data_schema)`.
+    #[must_use]
+    pub fn step_specs(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.registry.specs()
     }
 
     /// Configured routines as `(name, description, step_count)`, sorted.
@@ -385,10 +391,11 @@ async fn run_with(
     };
 
     // Soft-skip probe: a missing external tool skips the step, it does not
-    // fail the routine. (Dry runs skip the probe — nothing will spawn.)
+    // fail the routine. Answered by the spawner seam, so mocked engines are
+    // host-independent. (Dry runs skip the probe — nothing will spawn.)
     if !cx.dry_run {
         for program in handler.required_programs(step) {
-            if !program_available(&program) {
+            if !cx.exec.program_available(&program) {
                 return StepResult::skip(
                     &step.name,
                     &step.step_type,
@@ -536,14 +543,28 @@ type = "no-such-type"
 
     #[tokio::test]
     async fn missing_tool_soft_skips_the_step() {
-        let engine = engine_with(
+        // Regression: the probe must come from the spawner seam, not the
+        // host PATH — mocked engines answer identically on every machine.
+        let config = Config::from_toml(
             r#"
 [[routines.r.steps]]
 name = "ghost"
 type = "script"
-command = "definitely-not-a-real-binary-xyzzy"
+command = "ghost-tool"
 "#,
-            vec![],
+        )
+        .unwrap();
+        let registry = crate::steps::builtin_registry();
+        let declared = config.declared_programs(&registry);
+        let granted = Caveats {
+            exec: Scope::only(declared),
+            ..Caveats::top()
+        };
+        let engine = Engine::with_spawner(
+            config,
+            registry,
+            granted,
+            Arc::new(MockSpawner::default().missing(["ghost-tool"])),
         );
         let report = engine
             .run_routine("r", RunOptions::default())

@@ -70,6 +70,17 @@ impl StepHandler for PyStep {
         self.type_name
     }
 
+    fn description(&self) -> &'static str {
+        "Python-registered in-process step handler"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        // Passthrough: the Python handler owns its payload.
+        serde_json::json!({
+            "description": "handler-defined payload (Python dict `data` field)"
+        })
+    }
+
     fn required_programs(&self, _spec: &modulex_core::StepSpec) -> Vec<String> {
         vec![] // in-proc; spawns nothing through the engine by itself
     }

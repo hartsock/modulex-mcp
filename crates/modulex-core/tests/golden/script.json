@@ -1,0 +1,15 @@
+{
+  "properties": {
+    "exit_code": {
+      "description": "null when killed at timeout",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "exit_code"
+  ],
+  "type": "object"
+}

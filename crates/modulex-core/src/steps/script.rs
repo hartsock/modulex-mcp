@@ -77,6 +77,21 @@ impl StepHandler for Script {
         "script"
     }
 
+    fn description(&self) -> &'static str {
+        "Run an external command; trimmed stdout becomes the report section"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["exit_code"],
+            "properties": {
+                "exit_code": { "type": ["integer", "null"],
+                               "description": "null when killed at timeout" }
+            }
+        })
+    }
+
     fn required_programs(&self, spec: &StepSpec) -> Vec<String> {
         command_of(spec).into_iter().collect()
     }
@@ -90,10 +105,14 @@ impl StepHandler for Script {
             Err(result) => return result,
         };
         if out.timed_out {
-            return StepResult::fail(&spec.name, &spec.step_type, out.stderr.trim());
+            let mut result = StepResult::fail(&spec.name, &spec.step_type, out.stderr.trim());
+            result.data = Some(serde_json::json!({ "exit_code": null }));
+            return result;
         }
         if out.success() {
-            StepResult::ok(&spec.name, &spec.step_type, out.stdout.trim())
+            let mut result = StepResult::ok(&spec.name, &spec.step_type, out.stdout.trim());
+            result.data = Some(serde_json::json!({ "exit_code": 0 }));
+            result
         } else {
             let mut result = StepResult::fail(
                 &spec.name,
@@ -107,6 +126,7 @@ impl StepHandler for Script {
             // Keep whatever stdout the failing script produced — often the
             // useful half of a diagnostic.
             result.output = out.stdout.trim().to_string();
+            result.data = Some(serde_json::json!({ "exit_code": out.status }));
             result
         }
     }
@@ -119,6 +139,17 @@ pub struct Harness;
 impl StepHandler for Harness {
     fn type_name(&self) -> &'static str {
         "harness"
+    }
+
+    fn description(&self) -> &'static str {
+        "Run an external tool whose contract is one JSON object on stdout"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        // Passthrough: the tool owns its payload. Empty schema = any JSON.
+        serde_json::json!({
+            "description": "tool-defined payload (the JSON object the harness emitted)"
+        })
     }
 
     fn required_programs(&self, spec: &StepSpec) -> Vec<String> {
