@@ -154,9 +154,14 @@ args = ["-c", "echo hi"]
 [[routines.morning.steps]]
 name = "deadlines"
 type = "deadline-calc"
+
+[[routines.morning.steps]]
+name = "agenda"
+type = "reminders"
 "#;
 
-    /// A server over a mock spawner so no real process ever runs.
+    /// A server over a mock spawner (no real processes) and an in-memory
+    /// store (no filesystem).
     fn server(outputs: Vec<modulex_core::ExecOutput>) -> Server {
         let config = Config::from_toml(TEST_CONFIG).unwrap();
         let registry = builtin_registry();
@@ -167,7 +172,8 @@ type = "deadline-calc"
         let spawner = Arc::new(modulex_core::exec::test_support::MockSpawner::with_outputs(
             outputs,
         ));
-        Server::new(Engine::with_spawner(config, registry, granted, spawner))
+        let store = Arc::new(modulex_core::Store::in_memory().unwrap());
+        Server::new(Engine::with_spawner(config, registry, granted, spawner).with_store(store))
     }
 
     fn ok_out(stdout: &str) -> modulex_core::ExecOutput {
@@ -200,7 +206,7 @@ type = "deadline-calc"
     }
 
     #[tokio::test]
-    async fn tools_list_names_all_five_tools() {
+    async fn tools_list_names_the_full_surface() {
         let s = server(vec![]);
         let resp = s
             .handle(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
@@ -219,9 +225,136 @@ type = "deadline-calc"
                 "routine_list",
                 "step_run",
                 "report_get",
-                "steps_list"
+                "steps_list",
+                "reminder_add",
+                "reminder_list",
+                "reminder_done",
+                "countdown_add",
+                "countdown_retire",
+                "watch_add",
+                "watch_list",
+                "watch_remove",
+                "store_export",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn reminder_lifecycle_over_mcp_stamps_generations() {
+        let s = server(vec![ok_out("hi\n")]);
+        // Run once so the current generation is 1.
+        s.handle(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "routine_run", "arguments": { "routine": "morning" } }
+        }))
+        .await
+        .unwrap();
+
+        // Register a reminder — stamped "after run 1".
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "reminder_add",
+                            "arguments": { "text": "rotate the token", "due": "2026-06-10" } }
+            }))
+            .await
+            .unwrap();
+        assert!(resp["result"].get("isError").is_none());
+        let created: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(created["created_gen"], 1);
+        let id = created["id"].as_i64().unwrap();
+
+        // It lists as open…
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "reminder_list" }
+            }))
+            .await
+            .unwrap();
+        let open: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(open[0]["text"], "rotate the token");
+
+        // …surfaces in the reminders step of the NEXT run…
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "step_run",
+                            "arguments": { "routine": "morning", "step": "agenda" } }
+            }))
+            .await
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("rotate the token"), "got: {text}");
+
+        // …and double-done is an error.
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": { "name": "reminder_done", "arguments": { "id": id } }
+            }))
+            .await
+            .unwrap();
+        assert!(resp["result"].get("isError").is_none());
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                "params": { "name": "reminder_done", "arguments": { "id": id } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn watch_and_countdown_tools_round_trip() {
+        let s = server(vec![]);
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "watch_add",
+                            "arguments": { "url": "https://example.com/releases",
+                                           "note": "new versions" } }
+            }))
+            .await
+            .unwrap();
+        assert!(resp["result"].get("isError").is_none());
+
+        // Non-http URLs are rejected before the store.
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "watch_add", "arguments": { "url": "file:///etc/passwd" } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "countdown_add",
+                            "arguments": { "label": "ramp", "start_date": "2026-06-01",
+                                           "end_date": "2026-07-15" } }
+            }))
+            .await
+            .unwrap();
+        assert!(resp["result"].get("isError").is_none());
+
+        // Export carries everything as plain JSON (sovereignty).
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "store_export" }
+            }))
+            .await
+            .unwrap();
+        let dump: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(dump["watches"][0]["url"], "https://example.com/releases");
+        assert_eq!(dump["countdowns"][0]["label"], "ramp");
     }
 
     #[tokio::test]
@@ -338,7 +471,7 @@ type = "deadline-calc"
         let payload: Value =
             serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(payload["routines"][0]["name"], "morning");
-        assert_eq!(payload["routines"][0]["steps"], 2);
+        assert_eq!(payload["routines"][0]["steps"], 3);
 
         let resp = s
             .handle(&json!({

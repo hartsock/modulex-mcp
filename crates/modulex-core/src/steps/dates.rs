@@ -126,7 +126,21 @@ impl StepHandler for CountdownCalc {
     }
 
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
-        let countdowns = &cx.config.countdowns;
+        // Config entries + agent-registered store entries, merged. Store
+        // failures degrade to config-only (soft).
+        let mut countdowns = cx.config.countdowns.clone();
+        if let Some(store) = &cx.store {
+            if let Ok(stored) = store.countdowns_active() {
+                countdowns.extend(stored.into_iter().map(|c| crate::config::CountdownEntry {
+                    label: c.label,
+                    start_date: c.start_date,
+                    end_date: c.end_date,
+                    total_work_days: c.total_work_days,
+                    role: String::new(),
+                    display: c.display,
+                }));
+            }
+        }
         if countdowns.is_empty() {
             return StepResult::ok(&spec.name, &spec.step_type, "No countdowns configured.");
         }
@@ -142,7 +156,7 @@ impl StepHandler for CountdownCalc {
             );
         }
 
-        let output = render_countdowns(countdowns, today());
+        let output = render_countdowns(&countdowns, today());
         StepResult::ok(&spec.name, &spec.step_type, output)
     }
 }

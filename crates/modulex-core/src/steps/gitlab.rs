@@ -364,6 +364,7 @@ mod tests {
                 generation: 1,
                 exec: gate_with(&granted, spawner.clone()),
                 prior: Vec::new(),
+                store: None,
             },
             spawner,
         )

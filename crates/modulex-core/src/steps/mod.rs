@@ -16,8 +16,9 @@
 //! | `mr-sla-check` | [`gitlab`] | — (derived from prior results) |
 //! | `board-scan` | [`board`] | — |
 //! | `chores-check` | [`board`] | — |
-//!
 //! | `python` | [`python`] | the configured interpreter (plugin protocol) |
+//! | `reminders` | [`reminders`] | — (agent state store) |
+//! | `url-watch` | [`web`] | — (leashed in-proc fetch; feature `web`) |
 
 use std::sync::Arc;
 
@@ -29,7 +30,10 @@ pub mod git;
 pub mod github;
 pub mod gitlab;
 pub mod python;
+pub mod reminders;
 pub mod script;
+#[cfg(feature = "web")]
+pub mod web;
 
 /// A registry holding every builtin handler.
 #[must_use]
@@ -50,6 +54,9 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(board::BoardScan));
     registry.register(Arc::new(board::ChoresCheck));
     registry.register(Arc::new(python::PythonPlugin));
+    registry.register(Arc::new(reminders::Reminders));
+    #[cfg(feature = "web")]
+    registry.register(Arc::new(web::UrlWatch::new()));
     registry
 }
 
@@ -76,8 +83,11 @@ mod tests {
             "board-scan",
             "chores-check",
             "python",
+            "reminders",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
+        #[cfg(feature = "web")]
+        assert!(names.iter().any(|n| n == "url-watch"));
     }
 }

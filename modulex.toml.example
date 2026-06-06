@@ -73,7 +73,20 @@ name = "unpushed"
 type = "git-unpushed"
 parallel = true
 
-# --- Phase: deadlines & countdowns (pure) ---
+# --- Phase: agent state (reminders + watched pages) ---
+# Agents register these at any time via MCP tools (reminder_add, watch_add,
+# countdown_add, ...) or `modulex remind add` — no config edits. State lives
+# in the store ($MODULEX_STORE → [store] path → ~/.modulex/store.db).
+
+[[routines.morning.steps]]
+name = "reminders"
+type = "reminders"
+
+[[routines.morning.steps]]
+name = "watched pages"
+type = "url-watch" # leashed in-proc fetch: net Caveats axis + SSRF screening
+
+# --- Phase: deadlines & countdowns (config + store, merged) ---
 
 [[routines.morning.steps]]
 name = "deadlines"
