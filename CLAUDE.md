@@ -13,6 +13,21 @@ It is a telescope, not the sky: the point is *starting the day with context*,
 identically for every agent and human that asks. Don't grow product features
 into the engine — grow step types and plugins.
 
+## The foundation pass (read docs/FOUNDATION.md first)
+
+This project's reason to exist is anti-bloat **by construction**: the data
+contract (#26), progressive disclosure (#32), and the plugin crate model
+(#10). Until that pass is complete, no plugin-backlog work (#11–#31) starts.
+Standing law from it:
+
+- **Steps before tools** — new capability is a step type unless it mutates;
+  tool additions justify themselves in the PR.
+- **The tool budget is a CI-pinned constant** (default `tools/list` ≤ 12).
+- **`data` schemas are versioned contracts** — breaking one is a breaking
+  release with a regression test.
+- **Every PR states its disclosure tier** (step / store kind / facet tool /
+  discovered tool).
+
 ## Hard rules
 
 1. **All subprocess spawns go through `ExecGate::spawn`**
