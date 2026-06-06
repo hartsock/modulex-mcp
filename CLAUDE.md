@@ -58,11 +58,18 @@ comments — keep them.
 
 ## Versioning & release
 
-- kyln scheme: `0.{month}.{YYYYMMDD}` in `[workspace.package]`
-  (e.g. `0.6.20260605`). Bump on release, all crates lock-step.
+- **0.1.x semver line** (Shawn, 2026-06-05). First publish = `0.1.0`, cut
+  manually after multi-host testing. All crates lock-step in
+  `[workspace.package]`; internal deps pin `=X.Y.Z` — bump them together.
+- Release path: `.github/workflows/release.yml` (newt-agent lineage).
+  Tag `v*` → binaries + GitHub release (draft) + crates.io
+  (core → cli → mcp, 429-aware) + wheels → PyPI. `release/**` branches
+  build binaries only. Needs `CARGO_REGISTRY_TOKEN` + `PYPI_API_TOKEN`
+  secrets before the first tag.
 - crates.io: `modulex-core`, `modulex-cli`, `modulex-mcp`. PyPI (wheels via
-  maturin): `modulex-cli`, `modulex-mcp` (bin wheels), `modulex-py` (cdylib).
-  Bare `modulex` is TAKEN on PyPI — never use it.
+  maturin): `modulex-cli`, `modulex-mcp` (bin wheels), `modulex-py` (cdylib,
+  publish=false on crates.io). Bare `modulex` is TAKEN on PyPI — never use
+  it.
 
 ## Architecture map
 

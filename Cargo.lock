@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "modulex-cli"
-version = "0.6.20260605"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "modulex-core"
-version = "0.6.20260605"
+version = "0.1.0"
 dependencies = [
  "agent-bridle-core",
  "anyhow",
@@ -686,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "modulex-mcp"
-version = "0.6.20260605"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "modulex-py"
-version = "0.6.20260605"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "modulex-core",

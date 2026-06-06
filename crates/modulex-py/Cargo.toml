@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 [dependencies]
 async-trait = { workspace = true }
 modulex-core = { workspace = true }
-modulex-mcp = { path = "../modulex-mcp", version = "=0.6.20260605" }
+modulex-mcp = { path = "../modulex-mcp", version = "=0.1.0" }
 serde_json = { workspace = true }
 
 # Extension-module: does not link libpython (the inverse-embedding trick —

@@ -1,78 +1,332 @@
-# Release: cargo publish + PyPI wheels, on a v* tag (or manual dispatch).
+name: Release
+
+# Patterned on newt-agent's PROVEN release.yml (which is itself patterned on
+# agent-mesh's): cross-platform release binaries, a topologically-ordered
+# crates.io publish chain with 429-aware retries, maturin wheels, and a
+# tag-gated PyPI publish.
 #
-# Required secrets (set before the first release):
-#   CARGO_REGISTRY_TOKEN — crates.io (publishes modulex-core/-cli/-mcp;
-#                          modulex-py is PyPI-only, publish = false)
-#   PYPI_API_TOKEN       — PyPI (wheels: modulex-cli, modulex-mcp bin wheels
-#                          + modulex-py extension wheel)
+# modulex differences from newt:
+#  - THREE PyPI packages, not one: `modulex-cli` + `modulex-mcp` are
+#    bindings="bin" wheels (pure Rust, interpreter-independent) and
+#    `modulex-py` is the PyO3 cdylib (per-interpreter). Bare `modulex` is
+#    TAKEN on PyPI — never used.
+#  - crates.io publishing is ACTIVE (no git deps in our graph, unlike
+#    newt's agent-bridle/brush git-dep gate): modulex-core → modulex-cli →
+#    modulex-mcp. modulex-py is publish=false (PyPI-only).
+#  - Windows is IN for binaries and bin wheels (no iroh/quinn in our
+#    transitive graph); the cdylib wheel ships Linux+macOS first.
+#
+# Triggers:
+#  - Tag push `v*`            → full release: binaries + crates + wheels + PyPI
+#  - Branch push `release/**` → build binaries only (publishing is tag-gated)
+#  - workflow_dispatch        → manual build (no upload)
+#
+# Secrets (Settings → Secrets and variables → Actions). Both are
+# account-scoped tokens, so NEW components publish with no per-registry
+# per-project setup:
+#  - CARGO_REGISTRY_TOKEN — crates.io publish (publish-crates job)
+#  - PYPI_API_TOKEN       — PyPI wheel publish (publish-pypi job),
+#                           scope "Entire account"
+#
+# First publish: 0.1.0, cut manually once modulex has been tested in a few
+# places. Until then, tags are the only thing that can publish — don't tag.
 #
 # HOOK PARITY note: this workflow RELEASES, it does not validate — ci.yml is
 # the validation pipeline mirrored by .githooks/pre-push.
-name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
+    branches:
+      - "release/**"
   workflow_dispatch:
 
+permissions:
+  contents: write   # `gh release create` + binary asset upload
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
 jobs:
-  crates:
-    runs-on: ubuntu-latest
+  # ── Build cross-platform binaries ──────────────────────────────────────
+
+  build-binaries:
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+            archive_ext: tar.gz
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+            archive_ext: tar.gz
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+            archive_ext: zip
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish to crates.io (in dependency order)
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build binaries
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} -p modulex-cli -p modulex-mcp
+
+      - name: Stage release contents (Unix)
+        if: matrix.platform != 'windows-latest'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME//\//-}"
+          STAGE="modulex-${VERSION}-${{ matrix.label }}"
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/modulex "$STAGE/"
+          cp target/${{ matrix.target }}/release/modulex-mcp "$STAGE/"
+          cp LICENSE-MIT LICENSE-APACHE README.md modulex.toml.example "$STAGE/"
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "ARCHIVE=$STAGE.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Stage release contents (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $VERSION = "${env:GITHUB_REF_NAME}" -replace '/', '-'
+          $STAGE = "modulex-$VERSION-${{ matrix.label }}"
+          New-Item -ItemType Directory -Path $STAGE
+          Copy-Item "target/${{ matrix.target }}/release/modulex.exe" $STAGE/
+          Copy-Item "target/${{ matrix.target }}/release/modulex-mcp.exe" $STAGE/
+          Copy-Item LICENSE-MIT, LICENSE-APACHE, README.md, modulex.toml.example $STAGE/
+          Compress-Archive -Path $STAGE -DestinationPath "$STAGE.zip"
+          echo "ARCHIVE=$STAGE.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: modulex-${{ matrix.label }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── GitHub release (tag-only) ─────────────────────────────────────────
+
+  github-release:
+    name: GitHub release (${{ github.ref_name }})
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts/
+      - name: Collect archives
+        run: |
+          mkdir -p dist
+          find all-artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} dist/ \;
+          ls -la dist/
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "modulex ${{ github.ref_name }}"
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*
+
+  # ── Publish to crates.io (tag-only, sequenced topologically) ──────────
+
+  publish-crates:
+    name: Publish ${{ matrix.crate }} → crates.io
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-binaries]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # leaves keep going if one fails
+      max-parallel: 1    # but ONE at a time — internal deps need order
+      matrix:
+        # Topological order: core first, the binaries after.
+        # modulex-py is publish = false (PyPI-only) — NOT in this matrix.
+        crate:
+          - modulex-core
+          - modulex-cli
+          - modulex-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-${{ matrix.crate }}
+
+      - name: Confirm CARGO_REGISTRY_TOKEN is mounted
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p modulex-core
-          cargo publish -p modulex-cli
-          cargo publish -p modulex-mcp
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN repo secret not set — add it under Settings → Secrets and variables → Actions before the first release tag"
+            exit 1
+          fi
+          echo "CARGO_REGISTRY_TOKEN: present (${#CARGO_REGISTRY_TOKEN} chars)"
 
-  wheels:
+      - name: cargo publish ${{ matrix.crate }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # Resilient publish (newt-agent lineage):
+        #   - Idempotent: tolerate a version already on crates.io so a re-run
+        #     after a partial publish doesn't fail.
+        #   - 429-aware: publishing several NEW crate names in one release trips
+        #     crates.io's new-crate rate limit (HTTP 429). Back off and retry
+        #     instead of failing, so a batch of new components lands cleanly.
+        #   - Any other error is fatal.
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if cargo publish -p ${{ matrix.crate }} --locked --no-verify 2>publish.err; then
+              cat publish.err >&2 || true
+              echo "published ${{ matrix.crate }}"
+              exit 0
+            elif grep -qiE 'already (exists|uploaded)|is already uploaded|already published' publish.err; then
+              cat publish.err >&2
+              echo "::notice::${{ matrix.crate }} already published at this version — skipping"
+              exit 0
+            elif grep -qi '429 Too Many Requests' publish.err; then
+              cat publish.err >&2
+              wait=$((attempt * 90))
+              echo "::warning::crates.io rate-limited (429) on ${{ matrix.crate }} — waiting ${wait}s, retry ${attempt}/6"
+              sleep "$wait"
+            else
+              cat publish.err >&2
+              exit 1
+            fi
+          done
+          echo "::error::${{ matrix.crate }} still rate-limited (429) after 6 retries"
+          exit 1
+
+  # ── Build PyPI wheels (tag-only, maturin matrix) ──────────────────────
+  #
+  # Three packages:
+  #  - modulex-cli, modulex-mcp: bindings="bin" → interpreter-independent
+  #    wheels per OS (no --interpreter flag).
+  #  - modulex-py: PyO3 cdylib → per-interpreter wheels, Linux + macOS
+  #    first (add Windows when there's demand).
+
+  build-wheels:
+    name: Wheel ${{ matrix.crate }} (${{ matrix.os }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         crate: [modulex-cli, modulex-mcp, modulex-py]
         exclude:
-          # The extension wheel needs per-Python builds only where we test;
-          # start with Linux and grow the matrix when there's demand.
-          - os: macos-latest
-            crate: modulex-py
+          # cdylib wheel: Linux + macOS first.
           - os: windows-latest
             crate: modulex-py
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: PyO3/maturin-action@v1
+
+      - name: Build wheel (bin)
+        if: matrix.crate != 'modulex-py'
+        uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release -m crates/${{ matrix.crate }}/Cargo.toml -o dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheel-${{ matrix.crate }}-${{ matrix.os }}
-          path: dist/*.whl
+          args: --release --strip -m crates/${{ matrix.crate }}/Cargo.toml
+          manylinux: ${{ matrix.os == 'ubuntu-latest' && 'auto' || 'off' }}
 
-  publish-pypi:
-    needs: wheels
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/download-artifact@v4
+      - name: Build wheel (cdylib, per-interpreter)
+        if: matrix.crate == 'modulex-py'
+        uses: PyO3/maturin-action@v1
         with:
-          path: dist
-          merge-multiple: true
+          command: build
+          args: --release --strip -m crates/${{ matrix.crate }}/Cargo.toml --interpreter "3.9 3.10 3.11 3.12"
+          manylinux: ${{ matrix.os == 'ubuntu-latest' && 'auto' || 'off' }}
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.crate }}-${{ matrix.os }}
+          path: target/wheels/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  build-sdist:
+    name: Build sdist (modulex-py)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Upload to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: -m crates/modulex-py/Cargo.toml
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: target/wheels/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Publish wheels to PyPI (tag-only, account-scoped API token) ───────
+  #
+  # Auth: an account-scoped PyPI API token in the `PYPI_API_TOKEN` repo
+  # secret. Account scope is deliberate: it can upload ANY project,
+  # including brand-new package names, with NO per-project
+  # trusted-publisher registration (the PyPI analogue of
+  # CARGO_REGISTRY_TOKEN — set once, publishes every component).
+  # To rotate: https://pypi.org/manage/account/token/ (scope "Entire
+  # account") and replace the secret.
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build-wheels, build-sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all wheels + sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-merged
+      - name: Flatten dist layout
         run: |
-          pip install twine
-          twine upload dist/*.whl
+          set -eux
+          mkdir -p dist
+          # Only Python dists (modulex_*) may go to PyPI. The modulex-v*
+          # binary archives are GitHub-release assets, not Python dists; a
+          # broad glob would copy those tarballs here and pypi-publish would
+          # fail with InvalidDistribution: No PKG-INFO (newt-agent lesson).
+          find dist-merged -type f \( -name 'modulex_*.whl' -o -name 'modulex_py-*.tar.gz' \) -exec cp {} dist/ \;
+          ls -lh dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # Account-scoped token — publishes any project, new ones included.
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # newt-agent#121 lesson: the action defaults `attestations: true`,
+          # which requires OIDC trusted-publishing; with token auth that
+          # default fails the upload. We auth with an account-scoped API
+          # token, so attestations MUST stay disabled here.
+          attestations: false
+          skip-existing: true
