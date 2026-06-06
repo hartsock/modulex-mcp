@@ -98,6 +98,37 @@ impl StepHandler for UrlWatch {
         "url-watch"
     }
 
+    fn description(&self) -> &'static str {
+        "Change tracking over registered URLs (leashed fetch, content hashing)"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["watches"],
+            "properties": {
+                "watches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["url", "state"],
+                        "properties": {
+                            "url": { "type": "string" },
+                            "note": { "type": "string" },
+                            "state": { "type": "string",
+                                       "enum": ["first", "unchanged", "changed", "error"] },
+                            "title": { "type": "string" },
+                            "http_status": { "type": "integer" },
+                            "since_gen": { "type": "integer",
+                                           "description": "generation of the previous fetch" },
+                            "detail": { "type": "string", "description": "error text" }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec![] // in-proc fetch; the leash here is the NET axis, not exec
     }
@@ -122,6 +153,7 @@ impl StepHandler for UrlWatch {
         }
 
         let mut repo_results = Vec::with_capacity(watches.len());
+        let mut data_watches = Vec::with_capacity(watches.len());
         for watch in &watches {
             let label = if watch.note.is_empty() {
                 watch.url.clone()
@@ -133,16 +165,31 @@ impl StepHandler for UrlWatch {
                     let hash = blake3::hash(fetched.markdown.as_bytes())
                         .to_hex()
                         .to_string();
-                    let line = match (&watch.last_hash, watch.last_seen_gen) {
-                        (Some(previous), Some(seen)) if *previous == hash => {
-                            format!("unchanged since gen {seen} — {}", fetched.title)
-                        }
-                        (Some(_), Some(seen)) => format!(
-                            "CHANGED since gen {seen} — {} (HTTP {})",
-                            fetched.title, fetched.status
+                    let (state, since_gen, line) = match (&watch.last_hash, watch.last_seen_gen) {
+                        (Some(previous), Some(seen)) if *previous == hash => (
+                            "unchanged",
+                            Some(seen),
+                            format!("unchanged since gen {seen} — {}", fetched.title),
                         ),
-                        _ => format!("first fetch — {} (HTTP {})", fetched.title, fetched.status),
+                        (Some(_), Some(seen)) => (
+                            "changed",
+                            Some(seen),
+                            format!(
+                                "CHANGED since gen {seen} — {} (HTTP {})",
+                                fetched.title, fetched.status
+                            ),
+                        ),
+                        _ => (
+                            "first",
+                            None,
+                            format!("first fetch — {} (HTTP {})", fetched.title, fetched.status),
+                        ),
                     };
+                    data_watches.push(serde_json::json!({
+                        "url": watch.url, "note": watch.note, "state": state,
+                        "title": fetched.title, "http_status": fetched.status,
+                        "since_gen": since_gen,
+                    }));
                     if let Err(e) = store.watch_seen(watch.id, &hash, cx.generation) {
                         repo_results.push(RepoResult::err(&label, e.to_string()));
                     } else {
@@ -151,7 +198,13 @@ impl StepHandler for UrlWatch {
                 }
                 // A denied or failed fetch is data, not a dead routine — the
                 // denial reason (net leash, SSRF screen) lands in the report.
-                Err(e) => repo_results.push(RepoResult::err(&label, e)),
+                Err(e) => {
+                    data_watches.push(serde_json::json!({
+                        "url": watch.url, "note": watch.note, "state": "error",
+                        "detail": e,
+                    }));
+                    repo_results.push(RepoResult::err(&label, e));
+                }
             }
         }
 
@@ -163,7 +216,10 @@ impl StepHandler for UrlWatch {
                 None => lines.push(rr.output.clone()),
             }
         }
-        StepResult::ok(&spec.name, &spec.step_type, lines.join("\n")).with_repos(repo_results)
+        let mut result =
+            StepResult::ok(&spec.name, &spec.step_type, lines.join("\n")).with_repos(repo_results);
+        result.data = Some(serde_json::json!({ "watches": data_watches }));
+        result
     }
 }
 

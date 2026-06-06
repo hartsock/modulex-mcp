@@ -1,0 +1,49 @@
+{
+  "properties": {
+    "deadlines": {
+      "items": {
+        "properties": {
+          "date": {
+            "description": "ISO YYYY-MM-DD",
+            "type": "string"
+          },
+          "days_left": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "end_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "date",
+          "days_left"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "invalid": {
+      "description": "labels with unparsable dates",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "deadlines",
+    "invalid"
+  ],
+  "type": "object"
+}

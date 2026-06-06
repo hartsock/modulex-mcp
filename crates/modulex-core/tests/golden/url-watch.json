@@ -1,0 +1,49 @@
+{
+  "properties": {
+    "watches": {
+      "items": {
+        "properties": {
+          "detail": {
+            "description": "error text",
+            "type": "string"
+          },
+          "http_status": {
+            "type": "integer"
+          },
+          "note": {
+            "type": "string"
+          },
+          "since_gen": {
+            "description": "generation of the previous fetch",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "first",
+              "unchanged",
+              "changed",
+              "error"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "watches"
+  ],
+  "type": "object"
+}

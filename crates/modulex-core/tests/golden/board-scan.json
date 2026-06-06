@@ -1,0 +1,34 @@
+{
+  "properties": {
+    "lanes": {
+      "items": {
+        "properties": {
+          "found": {
+            "description": "lane directory exists",
+            "type": "boolean"
+          },
+          "lane": {
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "lane",
+          "found",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "lanes"
+  ],
+  "type": "object"
+}

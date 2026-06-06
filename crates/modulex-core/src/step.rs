@@ -30,10 +30,28 @@ pub struct RunContext {
 
 /// A step implementation, registered in a [`crate::registry::StepRegistry`]
 /// under [`Self::type_name`].
+///
+/// ## The data contract (FOUNDATION pillar A)
+///
+/// Reports serve humans AND agents: the markdown `output` is for the human;
+/// [`Self::data_schema`] describes the typed `StepResult::data` payload an
+/// executed step emits for agents. **Agents never parse prose.** Schemas are
+/// versioned contracts — they are pinned by the golden-schema regression
+/// harness, and breaking a shape is a breaking release. Dry-run and skipped
+/// results may omit `data`; executed results MUST match the schema.
 #[async_trait]
 pub trait StepHandler: Send + Sync {
     /// The registry key, e.g. `"git-status"`.
     fn type_name(&self) -> &'static str;
+
+    /// One-line human description, surfaced by `steps_list`.
+    fn description(&self) -> &'static str;
+
+    /// JSON Schema for this step's `StepResult::data` payload (executed,
+    /// non-skipped results). Passthrough steps (external tools/plugins that
+    /// own their payload) return a permissive schema and say so in the
+    /// description.
+    fn data_schema(&self) -> serde_json::Value;
 
     /// The external programs this step will spawn for `spec` (e.g. `["git"]`).
     /// Drives the declared-default exec grant and the engine's soft-skip

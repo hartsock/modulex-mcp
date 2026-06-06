@@ -45,7 +45,7 @@ pub fn tool_specs() -> Value {
                     "skip": { "type": "array", "items": { "type": "string" },
                               "description": "Skip these step names" },
                     "dry_run": { "type": "boolean", "default": false },
-                    "format": { "type": "string", "enum": ["text", "json"], "default": "text" }
+                    "format": { "type": "string", "enum": ["text", "json", "data"], "default": "text" }
                 },
                 "required": ["routine"]
             }
@@ -65,7 +65,7 @@ pub fn tool_specs() -> Value {
                     "routine": { "type": "string" },
                     "step": { "type": "string", "description": "Step name within the routine" },
                     "dry_run": { "type": "boolean", "default": false },
-                    "format": { "type": "string", "enum": ["text", "json"], "default": "text" }
+                    "format": { "type": "string", "enum": ["text", "json", "data"], "default": "text" }
                 },
                 "required": ["routine", "step"]
             }
@@ -79,13 +79,15 @@ pub fn tool_specs() -> Value {
                 "properties": {
                     "generation": { "type": "integer", "minimum": 1,
                                     "description": "Exact report generation; omit for latest" },
-                    "format": { "type": "string", "enum": ["text", "json"], "default": "text" }
+                    "format": { "type": "string", "enum": ["text", "json", "data"], "default": "text" }
                 }
             }
         },
         {
             "name": "steps_list",
-            "description": "List registered step types (builtin plus plugins).",
+            "description": "List registered step types with their data-contract \
+                schemas: [{type, description, data_schema}]. Executed steps' \
+                `data` payloads conform to these schemas (versioned contracts).",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -181,6 +183,8 @@ pub fn tool_specs() -> Value {
 fn render(report: &Report, args: &Value) -> String {
     match args.get("format").and_then(Value::as_str) {
         Some("json") => report.to_json(),
+        // The agent-native view: structured payloads only (data contract).
+        Some("data") => report.to_data_json(),
         _ => report.to_text(),
     }
 }
@@ -414,7 +418,16 @@ pub async fn call(engine: &Engine, name: &str, args: &Value) -> ToolOutcome {
                 }),
             }
         }
-        "steps_list" => ToolOutcome::ok(json!({ "step_types": engine.step_types() }).to_string()),
+        "steps_list" => {
+            let steps: Vec<Value> = engine
+                .step_specs()
+                .into_iter()
+                .map(|(name, description, schema)| {
+                    json!({ "type": name, "description": description, "data_schema": schema })
+                })
+                .collect();
+            ToolOutcome::ok(json!({ "steps": steps }).to_string())
+        }
         other => ToolOutcome::err(format!("unknown tool: {other}")),
     }
 }

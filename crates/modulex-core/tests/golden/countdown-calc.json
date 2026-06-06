@@ -1,0 +1,45 @@
+{
+  "properties": {
+    "countdowns": {
+      "items": {
+        "properties": {
+          "display_line": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "n": {
+            "description": "work days elapsed",
+            "type": "integer"
+          },
+          "role": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "label",
+          "n",
+          "total"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "invalid": {
+      "description": "labels with unparsable dates",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "countdowns",
+    "invalid"
+  ],
+  "type": "object"
+}

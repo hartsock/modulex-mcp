@@ -22,23 +22,39 @@ fn is_auth_error(stderr: &str) -> bool {
         || lower.contains("gh auth login")
 }
 
-/// Render one `gh pr list --json number,title,author,updatedAt` payload.
-fn render_prs(json_text: &str) -> Result<String, String> {
+/// Parse one `gh pr list --json number,title,author,updatedAt` payload into
+/// typed records for the data contract.
+fn parse_prs(json_text: &str) -> Result<Vec<Value>, String> {
     let prs: Vec<Value> =
         serde_json::from_str(json_text).map_err(|e| format!("unexpected gh output: {e}"))?;
-    if prs.is_empty() {
-        return Ok("(no open PRs)".to_string());
-    }
-    let lines: Vec<String> = prs
+    Ok(prs
         .iter()
         .map(|pr| {
-            let number = pr["number"].as_u64().unwrap_or(0);
-            let title = pr["title"].as_str().unwrap_or("(untitled)");
-            let author = pr["author"]["login"].as_str().unwrap_or("?");
-            format!("#{number} {title} ({author})")
+            serde_json::json!({
+                "number": pr["number"].as_u64().unwrap_or(0),
+                "title": pr["title"].as_str().unwrap_or("(untitled)"),
+                "author": pr["author"]["login"].as_str().unwrap_or("?"),
+            })
         })
-        .collect();
-    Ok(lines.join("\n"))
+        .collect())
+}
+
+/// Render typed PR records as compact report lines.
+fn render_prs(prs: &[Value]) -> String {
+    if prs.is_empty() {
+        return "(no open PRs)".to_string();
+    }
+    prs.iter()
+        .map(|pr| {
+            format!(
+                "#{} {} ({})",
+                pr["number"],
+                pr["title"].as_str().unwrap_or(""),
+                pr["author"].as_str().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `github-pr-scan`: open PRs per configured `owner/repo` slug.
@@ -48,6 +64,44 @@ pub struct GithubPrScan;
 impl StepHandler for GithubPrScan {
     fn type_name(&self) -> &'static str {
         "github-pr-scan"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open pull requests per configured repository"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["repos"],
+            "properties": {
+                "repos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["repo", "state", "prs"],
+                        "properties": {
+                            "repo": { "type": "string" },
+                            "state": { "type": "string",
+                                       "enum": ["ok", "auth-failed", "error"] },
+                            "prs": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["number", "title", "author"],
+                                    "properties": {
+                                        "number": { "type": "integer" },
+                                        "title": { "type": "string" },
+                                        "author": { "type": "string" }
+                                    }
+                                }
+                            },
+                            "detail": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        })
     }
 
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
@@ -84,6 +138,7 @@ impl StepHandler for GithubPrScan {
         };
 
         let mut repo_results = Vec::with_capacity(repos.len());
+        let mut data_repos = Vec::with_capacity(repos.len());
         let mut auth_failures = 0usize;
         for repo in &repos {
             let args: Vec<String> = [
@@ -111,6 +166,10 @@ impl StepHandler for GithubPrScan {
             {
                 Ok(out) => out,
                 Err(e) => {
+                    data_repos.push(serde_json::json!({
+                        "repo": repo, "state": "error", "prs": [],
+                        "detail": e.to_string(),
+                    }));
                     repo_results.push(RepoResult::err(repo, e.to_string()));
                     continue;
                 }
@@ -119,6 +178,9 @@ impl StepHandler for GithubPrScan {
                 let err = out.stderr.trim().to_string();
                 if is_auth_error(&err) {
                     auth_failures += 1;
+                    data_repos.push(serde_json::json!({
+                        "repo": repo, "state": "auth-failed", "prs": [], "detail": err,
+                    }));
                     repo_results.push(RepoResult {
                         repo: repo.clone(),
                         output: String::new(),
@@ -126,20 +188,31 @@ impl StepHandler for GithubPrScan {
                         error: Some(format!("Auth failed: {err}")),
                     });
                 } else {
-                    repo_results.push(RepoResult::err(
-                        repo,
-                        if err.is_empty() {
-                            "gh error".into()
-                        } else {
-                            err
-                        },
-                    ));
+                    let err = if err.is_empty() {
+                        "gh error".to_string()
+                    } else {
+                        err
+                    };
+                    data_repos.push(serde_json::json!({
+                        "repo": repo, "state": "error", "prs": [], "detail": err,
+                    }));
+                    repo_results.push(RepoResult::err(repo, err));
                 }
                 continue;
             }
-            match render_prs(out.stdout.trim()) {
-                Ok(body) => repo_results.push(RepoResult::ok(repo, body)),
-                Err(e) => repo_results.push(RepoResult::err(repo, e)),
+            match parse_prs(out.stdout.trim()) {
+                Ok(prs) => {
+                    data_repos.push(serde_json::json!({
+                        "repo": repo, "state": "ok", "prs": prs,
+                    }));
+                    repo_results.push(RepoResult::ok(repo, render_prs(&prs)));
+                }
+                Err(e) => {
+                    data_repos.push(serde_json::json!({
+                        "repo": repo, "state": "error", "prs": [], "detail": e,
+                    }));
+                    repo_results.push(RepoResult::err(repo, e));
+                }
             }
         }
 
@@ -159,7 +232,10 @@ impl StepHandler for GithubPrScan {
                 None => lines.push(rr.output.clone()),
             }
         }
-        StepResult::ok(&spec.name, &spec.step_type, lines.join("\n")).with_repos(repo_results)
+        let mut result =
+            StepResult::ok(&spec.name, &spec.step_type, lines.join("\n")).with_repos(repo_results);
+        result.data = Some(serde_json::json!({ "repos": data_repos }));
+        result
     }
 }
 

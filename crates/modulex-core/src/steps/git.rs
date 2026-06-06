@@ -34,10 +34,13 @@ async fn run_git(
 /// Fan a per-repo closure across the step's repo list, sequentially when the
 /// step is not parallel (the engine already parallelizes across *steps*;
 /// in-step fan-out stays simple and ordered).
+///
+/// `per_repo` returns the human-facing [`RepoResult`] plus the typed `state`
+/// enum for the data contract.
 async fn fan_out<F, Fut>(spec: &StepSpec, cx: &RunContext, per_repo: F) -> StepResult
 where
     F: Fn(String) -> Fut,
-    Fut: std::future::Future<Output = RepoResult>,
+    Fut: std::future::Future<Output = (RepoResult, &'static str)>,
 {
     let repos = repos_for(spec, &cx.config);
     if repos.is_empty() {
@@ -45,8 +48,15 @@ where
     }
 
     let mut repo_results = Vec::with_capacity(repos.len());
+    let mut data_repos = Vec::with_capacity(repos.len());
     for repo in repos {
-        repo_results.push(per_repo(repo).await);
+        let (rr, state) = per_repo(repo).await;
+        data_repos.push(serde_json::json!({
+            "repo": rr.repo,
+            "state": state,
+            "detail": rr.error.clone().unwrap_or_else(|| rr.output.clone()),
+        }));
+        repo_results.push(rr);
     }
 
     let mut lines = Vec::new();
@@ -59,6 +69,7 @@ where
     }
     let body = lines.join("\n");
     let mut result = StepResult::ok(&spec.name, &spec.step_type, body).with_repos(repo_results);
+    let mut data = serde_json::json!({ "repos": data_repos });
     if spec.step_type == "git-tend" {
         // Prepend the tend summary line.
         let total = result.repo_results.len();
@@ -69,8 +80,34 @@ where
             summary.push_str(&format!(", {failed} failed"));
         }
         result.output = format!("{summary}\n{}", result.output);
+        data["summary"] = serde_json::json!({ "tended": tended, "failed": failed, "total": total });
+    }
+    if !cx.dry_run {
+        result.data = Some(data);
     }
     result
+}
+
+/// Shared schema fragment: the per-repo data array.
+fn repos_schema(states: &[&str], extra_desc: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["repos"],
+        "properties": {
+            "repos": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["repo", "state", "detail"],
+                    "properties": {
+                        "repo": { "type": "string" },
+                        "state": { "type": "string", "enum": states },
+                        "detail": { "type": "string", "description": extra_desc }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// `git-status`: `git status --short` per repo; empty output renders `(clean)`.
@@ -82,6 +119,17 @@ impl StepHandler for GitStatus {
         "git-status"
     }
 
+    fn description(&self) -> &'static str {
+        "Working-tree status per repo (git status --short)"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        repos_schema(
+            &["clean", "dirty", "error"],
+            "short-status lines when dirty; error text on error",
+        )
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec!["git".into()]
     }
@@ -89,22 +137,25 @@ impl StepHandler for GitStatus {
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
         fan_out(spec, cx, |repo| async move {
             if cx.dry_run {
-                return RepoResult::ok(&repo, "[dry-run] would run: git status --short");
+                return (
+                    RepoResult::ok(&repo, "[dry-run] would run: git status --short"),
+                    "clean",
+                );
             }
             match run_git(&cx.exec, &repo, &["status", "--short"], spec.timeout).await {
                 Ok(out) if out.success() => {
                     let trimmed = out.stdout.trim();
-                    RepoResult::ok(
-                        &repo,
-                        if trimmed.is_empty() {
-                            "(clean)"
-                        } else {
-                            trimmed
-                        },
-                    )
+                    if trimmed.is_empty() {
+                        (RepoResult::ok(&repo, "(clean)"), "clean")
+                    } else {
+                        (RepoResult::ok(&repo, trimmed), "dirty")
+                    }
                 }
-                Ok(out) => RepoResult::err(&repo, nonempty(&out.stderr, "git error")),
-                Err(e) => RepoResult::err(&repo, e.to_string()),
+                Ok(out) => (
+                    RepoResult::err(&repo, nonempty(&out.stderr, "git error")),
+                    "error",
+                ),
+                Err(e) => (RepoResult::err(&repo, e.to_string()), "error"),
             }
         })
         .await
@@ -121,6 +172,17 @@ impl StepHandler for GitUnpushed {
         "git-unpushed"
     }
 
+    fn description(&self) -> &'static str {
+        "Local commits not yet pushed, per repo"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        repos_schema(
+            &["all-pushed", "unpushed", "no-upstream", "error"],
+            "oneline commit list when unpushed",
+        )
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec!["git".into()]
     }
@@ -128,7 +190,10 @@ impl StepHandler for GitUnpushed {
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
         fan_out(spec, cx, |repo| async move {
             if cx.dry_run {
-                return RepoResult::ok(&repo, "[dry-run] would run: git log @{u}..HEAD --oneline");
+                return (
+                    RepoResult::ok(&repo, "[dry-run] would run: git log @{u}..HEAD --oneline"),
+                    "all-pushed",
+                );
             }
             match run_git(
                 &cx.exec,
@@ -140,25 +205,25 @@ impl StepHandler for GitUnpushed {
             {
                 Ok(out) if out.success() => {
                     let trimmed = out.stdout.trim();
-                    RepoResult::ok(
-                        &repo,
-                        if trimmed.is_empty() {
-                            "(all pushed)"
-                        } else {
-                            trimmed
-                        },
-                    )
+                    if trimmed.is_empty() {
+                        (RepoResult::ok(&repo, "(all pushed)"), "all-pushed")
+                    } else {
+                        (RepoResult::ok(&repo, trimmed), "unpushed")
+                    }
                 }
                 Ok(out) => {
                     let msg = out.stderr.trim().to_string();
                     let lower = msg.to_lowercase();
                     if lower.contains("no upstream") || lower.contains("fatal") {
-                        RepoResult::ok(&repo, "(no upstream configured)")
+                        (
+                            RepoResult::ok(&repo, "(no upstream configured)"),
+                            "no-upstream",
+                        )
                     } else {
-                        RepoResult::err(&repo, nonempty(&msg, "git error"))
+                        (RepoResult::err(&repo, nonempty(&msg, "git error")), "error")
                     }
                 }
-                Err(e) => RepoResult::err(&repo, e.to_string()),
+                Err(e) => (RepoResult::err(&repo, e.to_string()), "error"),
             }
         })
         .await
@@ -176,6 +241,35 @@ impl StepHandler for GitTend {
         "git-tend"
     }
 
+    fn description(&self) -> &'static str {
+        "Fetch + fast-forward pull per repo; conflicts reported, never resolved"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        let mut schema = repos_schema(
+            &[
+                "ok",
+                "no-tracking",
+                "diverged",
+                "fetch-failed",
+                "pull-failed",
+                "error",
+            ],
+            "last pull line on ok; failure reason otherwise",
+        );
+        schema["required"] = serde_json::json!(["repos", "summary"]);
+        schema["properties"]["summary"] = serde_json::json!({
+            "type": "object",
+            "required": ["tended", "failed", "total"],
+            "properties": {
+                "tended": { "type": "integer" },
+                "failed": { "type": "integer" },
+                "total": { "type": "integer" }
+            }
+        });
+        schema
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec!["git".into()]
     }
@@ -183,9 +277,12 @@ impl StepHandler for GitTend {
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
         fan_out(spec, cx, |repo| async move {
             if cx.dry_run {
-                return RepoResult::ok(
-                    &repo,
-                    "[dry-run] would run: git fetch --all --prune && git pull --ff-only",
+                return (
+                    RepoResult::ok(
+                        &repo,
+                        "[dry-run] would run: git fetch --all --prune && git pull --ff-only",
+                    ),
+                    "ok",
                 );
             }
             let fetch = match run_git(
@@ -197,20 +294,23 @@ impl StepHandler for GitTend {
             .await
             {
                 Ok(out) => out,
-                Err(e) => return RepoResult::err(&repo, e.to_string()),
+                Err(e) => return (RepoResult::err(&repo, e.to_string()), "error"),
             };
             if !fetch.success() {
-                return RepoResult::err(
-                    &repo,
-                    format!(
-                        "fetch failed: {}",
-                        nonempty(fetch.stderr.trim(), "git error")
+                return (
+                    RepoResult::err(
+                        &repo,
+                        format!(
+                            "fetch failed: {}",
+                            nonempty(fetch.stderr.trim(), "git error")
+                        ),
                     ),
+                    "fetch-failed",
                 );
             }
             let pull = match run_git(&cx.exec, &repo, &["pull", "--ff-only"], spec.timeout).await {
                 Ok(out) => out,
-                Err(e) => return RepoResult::err(&repo, e.to_string()),
+                Err(e) => return (RepoResult::err(&repo, e.to_string()), "error"),
             };
             if pull.success() {
                 let line = pull
@@ -220,20 +320,29 @@ impl StepHandler for GitTend {
                     .last()
                     .unwrap_or("ok")
                     .to_string();
-                return RepoResult::ok(&repo, line);
+                return (RepoResult::ok(&repo, line), "ok");
             }
             let msg = pull.stderr.trim().to_lowercase();
             if msg.contains("not possible to fast-forward")
                 || msg.contains("diverg")
                 || msg.contains("would be overwritten")
             {
-                RepoResult::err(&repo, "diverged from upstream — manual resolution needed")
+                (
+                    RepoResult::err(&repo, "diverged from upstream — manual resolution needed"),
+                    "diverged",
+                )
             } else if msg.contains("no tracking") || msg.contains("no such ref") {
-                RepoResult::ok(&repo, "(no tracking branch — fetched only)")
+                (
+                    RepoResult::ok(&repo, "(no tracking branch — fetched only)"),
+                    "no-tracking",
+                )
             } else {
-                RepoResult::err(
-                    &repo,
-                    format!("pull failed: {}", nonempty(pull.stderr.trim(), "git error")),
+                (
+                    RepoResult::err(
+                        &repo,
+                        format!("pull failed: {}", nonempty(pull.stderr.trim(), "git error")),
+                    ),
+                    "pull-failed",
                 )
             }
         })

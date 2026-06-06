@@ -1,0 +1,39 @@
+{
+  "properties": {
+    "due_today": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "overdue": {
+      "items": {
+        "properties": {
+          "chore": {
+            "type": "string"
+          },
+          "days_overdue": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chore",
+          "days_overdue"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "upcoming": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "overdue",
+    "due_today",
+    "upcoming"
+  ],
+  "type": "object"
+}

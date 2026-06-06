@@ -46,6 +46,38 @@ impl StepHandler for DeadlineCalc {
         "deadline-calc"
     }
 
+    fn description(&self) -> &'static str {
+        "Days remaining per configured deadline; past deadlines dropped"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["deadlines", "invalid"],
+            "properties": {
+                "deadlines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["label", "date", "days_left"],
+                        "properties": {
+                            "label": { "type": "string" },
+                            "date": { "type": "string", "description": "ISO YYYY-MM-DD" },
+                            "end_date": { "type": ["string", "null"] },
+                            "days_left": { "type": "integer", "minimum": 0 },
+                            "notes": { "type": "string" }
+                        }
+                    }
+                },
+                "invalid": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "labels with unparsable dates"
+                }
+            }
+        })
+    }
+
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
         vec![]
     }
@@ -53,7 +85,10 @@ impl StepHandler for DeadlineCalc {
     async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
         let deadlines = &cx.config.deadlines;
         if deadlines.is_empty() {
-            return StepResult::ok(&spec.name, &spec.step_type, "No deadlines configured.");
+            let mut result =
+                StepResult::ok(&spec.name, &spec.step_type, "No deadlines configured.");
+            result.data = Some(serde_json::json!({ "deadlines": [], "invalid": [] }));
+            return result;
         }
         if cx.dry_run {
             let labels: Vec<&str> = deadlines.iter().map(|d| d.label.as_str()).collect();
@@ -67,42 +102,105 @@ impl StepHandler for DeadlineCalc {
             );
         }
 
-        let output = render_deadlines(deadlines, today());
-        StepResult::ok(&spec.name, &spec.step_type, output)
+        let computed = compute_deadlines(deadlines, today());
+        let mut result = StepResult::ok(&spec.name, &spec.step_type, render_deadlines(&computed));
+        result.data = Some(deadlines_data(&computed));
+        result
     }
 }
 
-/// Pure renderer, factored so tests pin `today`.
-fn render_deadlines(deadlines: &[crate::config::DeadlineEntry], today: NaiveDate) -> String {
-    let mut lines = Vec::new();
+/// One computed upcoming deadline (or an invalid entry).
+enum DeadlineRow {
+    Upcoming {
+        label: String,
+        date: String,
+        end_date: Option<String>,
+        days_left: i64,
+        notes: String,
+    },
+    Invalid(String),
+}
+
+/// Pure computation, factored so tests pin `today`. Past deadlines dropped.
+fn compute_deadlines(
+    deadlines: &[crate::config::DeadlineEntry],
+    today: NaiveDate,
+) -> Vec<DeadlineRow> {
+    let mut rows = Vec::new();
     for dl in deadlines {
         let Some(target) = parse_iso(&dl.date) else {
-            lines.push(format!("  {:<30}  invalid date", dl.label));
+            rows.push(DeadlineRow::Invalid(dl.label.clone()));
             continue;
         };
         if target < today {
             continue; // past deadline
         }
-        let days_left = (target - today).num_days();
-        let weeks = days_left / 7;
-        let date_str = match &dl.end_date {
-            Some(end) => format!("{} to {end}", dl.date),
-            None => dl.date.clone(),
-        };
-        let suffix = if weeks > 0 {
-            format!(" ({weeks} weeks)")
-        } else {
-            String::new()
-        };
-        let notes = if dl.notes.is_empty() {
-            String::new()
-        } else {
-            format!("  — {}", dl.notes)
-        };
-        lines.push(format!(
-            "  {:<30}  {date_str:<25}  {days_left} days{suffix}{notes}",
-            dl.label
-        ));
+        rows.push(DeadlineRow::Upcoming {
+            label: dl.label.clone(),
+            date: dl.date.clone(),
+            end_date: dl.end_date.clone(),
+            days_left: (target - today).num_days(),
+            notes: dl.notes.clone(),
+        });
+    }
+    rows
+}
+
+fn deadlines_data(rows: &[DeadlineRow]) -> serde_json::Value {
+    let mut deadlines = Vec::new();
+    let mut invalid = Vec::new();
+    for row in rows {
+        match row {
+            DeadlineRow::Upcoming {
+                label,
+                date,
+                end_date,
+                days_left,
+                notes,
+            } => deadlines.push(serde_json::json!({
+                "label": label, "date": date, "end_date": end_date,
+                "days_left": days_left, "notes": notes,
+            })),
+            DeadlineRow::Invalid(label) => invalid.push(label.clone()),
+        }
+    }
+    serde_json::json!({ "deadlines": deadlines, "invalid": invalid })
+}
+
+fn render_deadlines(rows: &[DeadlineRow]) -> String {
+    let mut lines = Vec::new();
+    for row in rows {
+        match row {
+            DeadlineRow::Invalid(label) => {
+                lines.push(format!("  {label:<30}  invalid date"));
+            }
+            DeadlineRow::Upcoming {
+                label,
+                date,
+                end_date,
+                days_left,
+                notes,
+            } => {
+                let weeks = days_left / 7;
+                let date_str = match end_date {
+                    Some(end) => format!("{date} to {end}"),
+                    None => date.clone(),
+                };
+                let suffix = if weeks > 0 {
+                    format!(" ({weeks} weeks)")
+                } else {
+                    String::new()
+                };
+                let notes = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("  — {notes}")
+                };
+                lines.push(format!(
+                    "  {label:<30}  {date_str:<25}  {days_left} days{suffix}{notes}"
+                ));
+            }
+        }
     }
     if lines.is_empty() {
         "(no upcoming deadlines)".to_string()
@@ -119,6 +217,38 @@ pub struct CountdownCalc;
 impl StepHandler for CountdownCalc {
     fn type_name(&self) -> &'static str {
         "countdown-calc"
+    }
+
+    fn description(&self) -> &'static str {
+        "Elapsed work days per countdown (config + store entries merged)"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["countdowns", "invalid"],
+            "properties": {
+                "countdowns": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["label", "n", "total"],
+                        "properties": {
+                            "label": { "type": "string" },
+                            "n": { "type": "integer", "description": "work days elapsed" },
+                            "total": { "type": "integer" },
+                            "display_line": { "type": "string" },
+                            "role": { "type": "string" }
+                        }
+                    }
+                },
+                "invalid": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "labels with unparsable dates"
+                }
+            }
+        })
     }
 
     fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
@@ -142,7 +272,10 @@ impl StepHandler for CountdownCalc {
             }
         }
         if countdowns.is_empty() {
-            return StepResult::ok(&spec.name, &spec.step_type, "No countdowns configured.");
+            let mut result =
+                StepResult::ok(&spec.name, &spec.step_type, "No countdowns configured.");
+            result.data = Some(serde_json::json!({ "countdowns": [], "invalid": [] }));
+            return result;
         }
         if cx.dry_run {
             let labels: Vec<&str> = countdowns.iter().map(|c| c.label.as_str()).collect();
@@ -156,31 +289,90 @@ impl StepHandler for CountdownCalc {
             );
         }
 
-        let output = render_countdowns(&countdowns, today());
-        StepResult::ok(&spec.name, &spec.step_type, output)
+        let computed = compute_countdowns(&countdowns, today());
+        let mut result = StepResult::ok(&spec.name, &spec.step_type, render_countdowns(&computed));
+        result.data = Some(countdowns_data(&computed));
+        result
     }
 }
 
-/// Pure renderer, factored so tests pin `today`.
-fn render_countdowns(countdowns: &[crate::config::CountdownEntry], today: NaiveDate) -> String {
-    let mut lines = Vec::new();
+/// One computed active countdown (or an invalid entry).
+enum CountdownRow {
+    Active {
+        label: String,
+        n: u32,
+        total: u32,
+        display_line: String,
+        role: String,
+    },
+    Invalid(String),
+}
+
+/// Pure computation, factored so tests pin `today`. Expired entries dropped.
+fn compute_countdowns(
+    countdowns: &[crate::config::CountdownEntry],
+    today: NaiveDate,
+) -> Vec<CountdownRow> {
+    let mut rows = Vec::new();
     for cd in countdowns {
         let (Some(start), Some(end)) = (parse_iso(&cd.start_date), parse_iso(&cd.end_date)) else {
-            lines.push(format!("- {}: invalid dates", cd.label));
+            rows.push(CountdownRow::Invalid(cd.label.clone()));
             continue;
         };
         if today > end {
             continue; // expired
         }
         let n = work_days_between(start, today);
-        let display = cd
+        let display_line = cd
             .display
             .replace("{label}", &cd.label)
             .replace("{n}", &n.to_string())
             .replace("{total}", &cd.total_work_days.to_string());
-        lines.push(display);
-        if !cd.role.is_empty() {
-            lines.push(format!("  Role: {}", cd.role));
+        rows.push(CountdownRow::Active {
+            label: cd.label.clone(),
+            n,
+            total: cd.total_work_days,
+            display_line,
+            role: cd.role.clone(),
+        });
+    }
+    rows
+}
+
+fn countdowns_data(rows: &[CountdownRow]) -> serde_json::Value {
+    let mut countdowns = Vec::new();
+    let mut invalid = Vec::new();
+    for row in rows {
+        match row {
+            CountdownRow::Active {
+                label,
+                n,
+                total,
+                display_line,
+                role,
+            } => countdowns.push(serde_json::json!({
+                "label": label, "n": n, "total": total,
+                "display_line": display_line, "role": role,
+            })),
+            CountdownRow::Invalid(label) => invalid.push(label.clone()),
+        }
+    }
+    serde_json::json!({ "countdowns": countdowns, "invalid": invalid })
+}
+
+fn render_countdowns(rows: &[CountdownRow]) -> String {
+    let mut lines = Vec::new();
+    for row in rows {
+        match row {
+            CountdownRow::Invalid(label) => lines.push(format!("- {label}: invalid dates")),
+            CountdownRow::Active {
+                display_line, role, ..
+            } => {
+                lines.push(display_line.clone());
+                if !role.is_empty() {
+                    lines.push(format!("  Role: {role}"));
+                }
+            }
         }
     }
     if lines.is_empty() {
@@ -238,7 +430,7 @@ mod tests {
                 notes: String::new(),
             },
         ];
-        let out = render_deadlines(&deadlines, date("2026-06-05"));
+        let out = render_deadlines(&compute_deadlines(&deadlines, date("2026-06-05")));
         assert!(out.contains("soon"));
         assert!(out.contains("5 days"));
         assert!(out.contains("— submit"));
@@ -258,7 +450,7 @@ mod tests {
             notes: String::new(),
         }];
         assert_eq!(
-            render_deadlines(&deadlines, date("2026-06-05")),
+            render_deadlines(&compute_deadlines(&deadlines, date("2026-06-05"))),
             "(no upcoming deadlines)"
         );
     }
@@ -284,7 +476,7 @@ mod tests {
             },
         ];
         // Friday 2026-06-05: Mon..Thu elapsed = 4 work days before today.
-        let out = render_countdowns(&countdowns, date("2026-06-05"));
+        let out = render_countdowns(&compute_countdowns(&countdowns, date("2026-06-05")));
         assert!(out.contains("Ramp: work day 4 of 30"));
         assert!(out.contains("Role: pilot"));
         assert!(!out.contains("Done"));

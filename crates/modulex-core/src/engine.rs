@@ -176,6 +176,12 @@ impl Engine {
         self.registry.type_names()
     }
 
+    /// Machine-readable step specs: `(type_name, description, data_schema)`.
+    #[must_use]
+    pub fn step_specs(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.registry.specs()
+    }
+
     /// Configured routines as `(name, description, step_count)`, sorted.
     #[must_use]
     pub fn list_routines(&self) -> Vec<(String, String, usize)> {
