@@ -134,6 +134,15 @@ pub enum ExecError {
 pub trait Spawner: Send + Sync {
     /// Run the request to completion (or timeout) and capture output.
     async fn spawn(&self, req: &ExecRequest) -> std::io::Result<ExecOutput>;
+
+    /// Is `program` runnable in this spawner's environment? Drives the
+    /// engine's soft-skip probe. The probe is an environment dependency, so
+    /// it lives on the SAME seam as the spawn — a mocked spawner answers for
+    /// its scripted world, never the host PATH (regression: the contract
+    /// test skipped per-host depending on which CLIs were installed).
+    fn program_available(&self, program: &str) -> bool {
+        program_available(program)
+    }
 }
 
 /// Real subprocess execution on tokio.
@@ -218,6 +227,12 @@ impl ExecGate {
         &self.cx
     }
 
+    /// Soft-skip probe, answered by the spawner (the environment seam).
+    #[must_use]
+    pub fn program_available(&self, program: &str) -> bool {
+        self.spawner.program_available(program)
+    }
+
     /// Leash-check, spawn, scrub. The ONLY subprocess path in modulex.
     ///
     /// # Errors
@@ -282,11 +297,15 @@ pub mod test_support {
     use super::*;
 
     /// Returns canned outputs in order; records every request's program+args.
+    /// Every program is "available" unless named in `missing` — the mock
+    /// answers for its scripted world, never the host PATH.
     #[derive(Default)]
     pub struct MockSpawner {
         outputs: Mutex<VecDeque<ExecOutput>>,
         /// Recorded `(program, args)` per call, for assertions.
         pub calls: Mutex<Vec<(String, Vec<String>)>>,
+        /// Programs the soft-skip probe reports as absent.
+        missing: std::collections::HashSet<String>,
     }
 
     impl MockSpawner {
@@ -296,7 +315,15 @@ pub mod test_support {
             Self {
                 outputs: Mutex::new(outputs.into()),
                 calls: Mutex::new(Vec::new()),
+                missing: std::collections::HashSet::new(),
             }
+        }
+
+        /// Mark programs as absent for the soft-skip probe (builder).
+        #[must_use]
+        pub fn missing<I: IntoIterator<Item = S>, S: Into<String>>(mut self, programs: I) -> Self {
+            self.missing.extend(programs.into_iter().map(Into::into));
+            self
         }
 
         /// A canned success with this stdout.
@@ -322,6 +349,10 @@ pub mod test_support {
 
     #[async_trait]
     impl Spawner for MockSpawner {
+        fn program_available(&self, program: &str) -> bool {
+            !self.missing.contains(program)
+        }
+
         async fn spawn(&self, req: &ExecRequest) -> std::io::Result<ExecOutput> {
             self.calls
                 .lock()
