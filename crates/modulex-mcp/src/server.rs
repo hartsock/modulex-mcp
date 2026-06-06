@@ -9,19 +9,23 @@ use std::sync::Arc;
 use modulex_core::Engine;
 use serde_json::{json, Value};
 
+use crate::facets::FacetPolicy;
 use crate::tools;
 
 /// MCP protocol revision this server implements.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// The MCP server: an engine plus the protocol shell.
+/// The MCP server: an engine, the facet exposure policy, and the protocol
+/// shell.
 pub struct Server {
     engine: Arc<Engine>,
+    policy: FacetPolicy,
     version: &'static str,
 }
 
 impl Server {
-    /// A server over an engine.
+    /// A server over an engine. The facet policy resolves from
+    /// `$MODULEX_TOOLS` → the engine config's `[mcp]` → the default index.
     #[must_use]
     pub fn new(engine: Engine) -> Self {
         Self::with_engine(Arc::new(engine))
@@ -32,10 +36,24 @@ impl Server {
     /// stored reports stay continuous).
     #[must_use]
     pub fn with_engine(engine: Arc<Engine>) -> Self {
+        let policy = FacetPolicy::load(&engine.config().mcp);
+        Self::with_policy(engine, policy)
+    }
+
+    /// A server with an explicit facet policy (tests; embedders).
+    #[must_use]
+    pub fn with_policy(engine: Arc<Engine>, policy: FacetPolicy) -> Self {
         Self {
             engine,
+            policy,
             version: env!("CARGO_PKG_VERSION"),
         }
+    }
+
+    /// The resolved facet policy (banner, introspection).
+    #[must_use]
+    pub fn policy(&self) -> &FacetPolicy {
+        &self.policy
     }
 
     /// Borrow the engine (the CLI `--probe` path uses this).
@@ -69,12 +87,14 @@ impl Server {
             // Notification: acknowledged by silence.
             "notifications/initialized" => return None,
             "ping" => json!({}),
-            "tools/list" => json!({ "tools": tools::tool_specs() }),
+            "tools/list" => json!({ "tools": tools::registry().specs_json(&self.policy) }),
             "tools/call" => {
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let outcome = tools::call(&self.engine, name, &args).await;
+                let outcome = tools::registry()
+                    .call(&self.engine, &self.policy, name, &args)
+                    .await;
                 let mut result = json!({
                     "content": [{ "type": "text", "text": outcome.text }]
                 });
@@ -226,17 +246,186 @@ type = "reminders"
                 "step_run",
                 "report_get",
                 "steps_list",
-                "reminder_add",
-                "reminder_list",
-                "reminder_done",
-                "countdown_add",
-                "countdown_retire",
-                "watch_add",
-                "watch_list",
-                "watch_remove",
-                "store_export",
-            ]
+                "store_put",
+                "store_query",
+                "store_close",
+                "tool_search",
+                "tool_describe",
+                "tool_invoke",
+            ],
+            "the DEFAULT index (progressive disclosure) — classic store tools \
+             are discoverable + callable but unlisted"
         );
+    }
+
+    #[tokio::test]
+    async fn unlisted_tools_remain_callable_and_discoverable() {
+        // Listing is context cost, not capability: reminder_add is in the
+        // non-default store-classic facet — absent from tools/list, but
+        // direct tools/call works, tool_search finds it, tool_describe
+        // discloses its schema, and tool_invoke dispatches it.
+        let s = server(vec![]);
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 60, "method": "tools/call",
+                "params": { "name": "tool_search", "arguments": { "query": "reminder add" } }
+            }))
+            .await
+            .unwrap();
+        let found: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(found["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "reminder_add" && t["mutates"] == true));
+
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 61, "method": "tools/call",
+                "params": { "name": "tool_describe", "arguments": { "name": "reminder_add" } }
+            }))
+            .await
+            .unwrap();
+        let spec: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(spec["facet"], "store-classic");
+        assert!(spec["inputSchema"]["properties"]["text"].is_object());
+
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 62, "method": "tools/call",
+                "params": { "name": "tool_invoke",
+                            "arguments": { "name": "reminder_add",
+                                           "arguments": { "text": "via invoke" } } }
+            }))
+            .await
+            .unwrap();
+        assert!(resp["result"].get("isError").is_none(), "{resp}");
+
+        // …and the record landed (store trio query view).
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 63, "method": "tools/call",
+                "params": { "name": "store_query", "arguments": { "kind": "reminder" } }
+            }))
+            .await
+            .unwrap();
+        let open: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(open[0]["text"], "via invoke");
+    }
+
+    #[tokio::test]
+    async fn store_trio_round_trips_every_kind() {
+        let s = server(vec![]);
+        for (kind, record, close_works) in [
+            ("reminder", json!({ "text": "r1" }), true),
+            (
+                "countdown",
+                json!({ "label": "c1", "start_date": "2026-06-01",
+                                   "end_date": "2999-01-01" }),
+                true,
+            ),
+            ("watch", json!({ "url": "https://example.com" }), true),
+        ] {
+            let resp = s
+                .handle(&json!({
+                    "jsonrpc": "2.0", "id": 70, "method": "tools/call",
+                    "params": { "name": "store_put",
+                                "arguments": { "kind": kind, "record": record } }
+                }))
+                .await
+                .unwrap();
+            assert!(resp["result"].get("isError").is_none(), "{kind}: {resp}");
+            let put: Value =
+                serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            let id = put["id"].as_i64().unwrap();
+
+            let resp = s
+                .handle(&json!({
+                    "jsonrpc": "2.0", "id": 71, "method": "tools/call",
+                    "params": { "name": "store_close",
+                                "arguments": { "kind": kind, "id": id } }
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp["result"].get("isError").is_none(),
+                close_works,
+                "{kind} close: {resp}"
+            );
+        }
+
+        // Unknown kind is a tool error.
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 72, "method": "tools/call",
+                "params": { "name": "store_put",
+                            "arguments": { "kind": "bogus", "record": {} } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn denied_facets_are_dead_everywhere() {
+        use modulex_core::config::McpConfig;
+        // Build a server whose policy denies store-classic entirely.
+        let config = Config::from_toml(TEST_CONFIG).unwrap();
+        let registry = builtin_registry();
+        let declared = config.declared_programs(&registry);
+        let granted = GrantedCaveats::resolve(None, None, declared)
+            .unwrap()
+            .caveats;
+        let spawner = Arc::new(modulex_core::exec::test_support::MockSpawner::with_outputs(
+            vec![],
+        ));
+        let store = Arc::new(modulex_core::Store::in_memory().unwrap());
+        let engine =
+            Arc::new(Engine::with_spawner(config, registry, granted, spawner).with_store(store));
+        let policy = crate::facets::FacetPolicy::resolve(
+            None,
+            &McpConfig {
+                expose: vec![],
+                deny: vec!["store-classic".into()],
+            },
+        );
+        let s = Server::with_policy(engine, policy);
+
+        // Not callable directly…
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 80, "method": "tools/call",
+                "params": { "name": "reminder_add", "arguments": { "text": "x" } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        // …not via invoke…
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 81, "method": "tools/call",
+                "params": { "name": "tool_invoke",
+                            "arguments": { "name": "reminder_add",
+                                           "arguments": { "text": "x" } } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        // …and invisible to search.
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 82, "method": "tools/call",
+                "params": { "name": "tool_search", "arguments": { "query": "reminder_add" } }
+            }))
+            .await
+            .unwrap();
+        let found: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(found["tools"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

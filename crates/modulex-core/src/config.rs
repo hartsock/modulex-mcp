@@ -159,6 +159,21 @@ pub struct ChoresConfig {
     pub path: String,
 }
 
+/// MCP surface exposure (`[mcp]`) — which tool facets a connected agent
+/// sees (FOUNDATION pillar B, progressive disclosure). Listing is not
+/// authorization: the leash governs effects; facets govern context cost.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct McpConfig {
+    /// Facets whose tools appear in `tools/list`. Empty = the built-in
+    /// default surface (the budgeted index).
+    #[serde(default)]
+    pub expose: Vec<String>,
+    /// Facets switched fully off: not listed, not discoverable, not
+    /// invokable.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
 /// Agent state store location (`[store]`).
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct StoreConfig {
@@ -229,6 +244,9 @@ pub struct Config {
     /// Agent state store config.
     #[serde(default)]
     pub store: StoreConfig,
+    /// MCP surface exposure config.
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Deadlines for `deadline-calc`.
     #[serde(default)]
     pub deadlines: Vec<DeadlineEntry>,

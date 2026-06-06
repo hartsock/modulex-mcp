@@ -59,8 +59,17 @@ pub struct ToolSpec {
     pub facet: &'static str,
 }
 
+/// Everything a tool handler can reach: the engine plus the facet policy
+/// (the discovery trio dispatches through the policy).
+pub struct CallCtx<'a> {
+    /// The routine engine.
+    pub engine: &'a Engine,
+    /// The connection's facet exposure policy.
+    pub policy: &'a crate::facets::FacetPolicy,
+}
+
 type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolOutcome> + Send + 'a>>;
-type ToolHandler = for<'a> fn(&'a Engine, &'a Value) -> ToolFuture<'a>;
+type ToolHandler = for<'a> fn(&'a CallCtx<'a>, &'a Value) -> ToolFuture<'a>;
 
 struct ToolEntry {
     spec: ToolSpec,
@@ -79,12 +88,14 @@ impl ToolRegistry {
         self.entries.iter().map(|e| &e.spec)
     }
 
-    /// The `tools/list` payload.
+    /// The `tools/list` payload: ONLY tools whose facet the policy exposes
+    /// (progressive disclosure — listing is context cost, not capability).
     #[must_use]
-    pub fn specs_json(&self) -> Value {
+    pub fn specs_json(&self, policy: &crate::facets::FacetPolicy) -> Value {
         Value::Array(
             self.entries
                 .iter()
+                .filter(|e| policy.exposes(e.spec.facet))
                 .map(|e| {
                     json!({
                         "name": e.spec.name,
@@ -96,12 +107,27 @@ impl ToolRegistry {
         )
     }
 
-    /// Dispatch one call. Unknown names are a tool error (engine fault).
-    pub async fn call(&self, engine: &Engine, name: &str, args: &Value) -> ToolOutcome {
-        match self.entries.iter().find(|e| e.spec.name == name) {
-            Some(entry) => (entry.handler)(engine, args).await,
-            None => ToolOutcome::err(format!("unknown tool: {name}")),
+    /// Dispatch one call. Callability is broader than listing: any
+    /// registered tool whose facet is not DENIED is callable (clients learn
+    /// names via tool_search). Unknown/denied names are tool errors.
+    pub async fn call(
+        &self,
+        engine: &Engine,
+        policy: &crate::facets::FacetPolicy,
+        name: &str,
+        args: &Value,
+    ) -> ToolOutcome {
+        let Some(entry) = self.entries.iter().find(|e| e.spec.name == name) else {
+            return ToolOutcome::err(format!("unknown tool: {name}"));
+        };
+        if policy.denies(entry.spec.facet) {
+            return ToolOutcome::err(format!(
+                "tool {name} is in denied facet {:?}",
+                entry.spec.facet
+            ));
         }
+        let cx = CallCtx { engine, policy };
+        (entry.handler)(&cx, args).await
     }
 }
 
@@ -109,17 +135,6 @@ impl ToolRegistry {
 pub fn registry() -> &'static ToolRegistry {
     static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
     REGISTRY.get_or_init(build_registry)
-}
-
-/// Tool definitions for `tools/list` (compat shim over [`registry`]).
-#[must_use]
-pub fn tool_specs() -> Value {
-    registry().specs_json()
-}
-
-/// Dispatch one tool call against the engine (compat shim over [`registry`]).
-pub async fn call(engine: &Engine, name: &str, args: &Value) -> ToolOutcome {
-    registry().call(engine, name, args).await
 }
 
 // ── shared helpers ─────────────────────────────────────────────────────
@@ -174,7 +189,7 @@ fn format_property() -> Value {
 
 // ── handlers ───────────────────────────────────────────────────────────
 
-fn h_routine_run<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
+fn h_routine_run<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
         let Some(routine) = args.get("routine").and_then(Value::as_str) else {
             return ToolOutcome::err("routine_run requires `routine`");
@@ -187,16 +202,16 @@ fn h_routine_run<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         };
-        match engine.run_routine(routine, opts).await {
+        match cx.engine.run_routine(routine, opts).await {
             Ok(report) => ToolOutcome::ok(render(&report, args)),
             Err(e) => engine_fault(&e),
         }
     })
 }
 
-fn h_routine_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
+fn h_routine_list<'a>(cx: &'a CallCtx<'a>, _args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let routines: Vec<Value> = engine
+        let routines: Vec<Value> = cx.engine
             .list_routines()
             .into_iter()
             .map(|(name, description, steps)| {
@@ -207,7 +222,7 @@ fn h_routine_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_step_run<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
+fn h_step_run<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
         let (Some(routine), Some(step)) = (
             args.get("routine").and_then(Value::as_str),
@@ -219,17 +234,17 @@ fn h_step_run<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
             .get("dry_run")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        match engine.run_step(routine, step, dry_run).await {
+        match cx.engine.run_step(routine, step, dry_run).await {
             Ok(report) => ToolOutcome::ok(render(&report, args)),
             Err(e) => engine_fault(&e),
         }
     })
 }
 
-fn h_report_get<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
+fn h_report_get<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
         let generation = args.get("generation").and_then(Value::as_u64);
-        match engine.report(generation) {
+        match cx.engine.report(generation) {
             Some(report) => ToolOutcome::ok(render(&report, args)),
             None => ToolOutcome::err(match generation {
                 Some(generation) => format!("no stored report for generation {generation}"),
@@ -239,9 +254,9 @@ fn h_report_get<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_steps_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
+fn h_steps_list<'a>(cx: &'a CallCtx<'a>, _args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let steps: Vec<Value> = engine
+        let steps: Vec<Value> = cx.engine
             .step_specs()
             .into_iter()
             .map(|(name, description, schema)| {
@@ -252,9 +267,10 @@ fn h_steps_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_reminder_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let store = match store_of(engine) {
+async fn reminder_add_impl(engine: &Engine, args: &Value) -> ToolOutcome {
+    {
+        let cx_engine = engine;
+        let store = match store_of(cx_engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -263,7 +279,7 @@ fn h_reminder_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
         };
         // Mutation stamps: the generation current at call time —
         // "registered after run N". A counter, never a clock.
-        let generation = engine.current_generation();
+        let generation = cx_engine.current_generation();
         store_outcome(
             store
                 .reminder_add(
@@ -274,12 +290,16 @@ fn h_reminder_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
                 )
                 .map(|id| json!({ "id": id, "created_gen": generation })),
         )
-    })
+    }
 }
 
-fn h_reminder_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
+fn h_reminder_add<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(reminder_add_impl(cx.engine, args))
+}
+
+fn h_reminder_list<'a>(cx: &'a CallCtx<'a>, _args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = match store_of(engine) {
+        let store = match store_of(cx.engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -287,16 +307,16 @@ fn h_reminder_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_reminder_done<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
+fn h_reminder_done<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = match store_of(engine) {
+        let store = match store_of(cx.engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
         let Some(id) = args.get("id").and_then(Value::as_i64) else {
             return ToolOutcome::err("reminder_done requires integer `id`");
         };
-        match store.reminder_done(id, engine.current_generation()) {
+        match store.reminder_done(id, cx.engine.current_generation()) {
             Ok(true) => ToolOutcome::ok(format!("reminder #{id} done")),
             Ok(false) => ToolOutcome::err(format!("no open reminder #{id}")),
             Err(e) => ToolOutcome::err(e.to_string()),
@@ -304,9 +324,10 @@ fn h_reminder_done<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_countdown_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let store = match store_of(engine) {
+async fn countdown_add_impl(engine: &Engine, args: &Value) -> ToolOutcome {
+    {
+        let cx_engine = engine;
+        let store = match store_of(cx_engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -322,7 +343,7 @@ fn h_countdown_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(30);
-        let generation = engine.current_generation();
+        let generation = cx_engine.current_generation();
         store_outcome(
             store
                 .countdown_add(
@@ -335,19 +356,23 @@ fn h_countdown_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
                 )
                 .map(|id| json!({ "id": id, "created_gen": generation })),
         )
-    })
+    }
 }
 
-fn h_countdown_retire<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
+fn h_countdown_add<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(countdown_add_impl(cx.engine, args))
+}
+
+fn h_countdown_retire<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = match store_of(engine) {
+        let store = match store_of(cx.engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
         let Some(id) = args.get("id").and_then(Value::as_i64) else {
             return ToolOutcome::err("countdown_retire requires integer `id`");
         };
-        match store.countdown_retire(id, engine.current_generation()) {
+        match store.countdown_retire(id, cx.engine.current_generation()) {
             Ok(true) => ToolOutcome::ok(format!("countdown #{id} retired")),
             Ok(false) => ToolOutcome::err(format!("no active countdown #{id}")),
             Err(e) => ToolOutcome::err(e.to_string()),
@@ -355,9 +380,10 @@ fn h_countdown_retire<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a>
     })
 }
 
-fn h_watch_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let store = match store_of(engine) {
+async fn watch_add_impl(engine: &Engine, args: &Value) -> ToolOutcome {
+    {
+        let cx_engine = engine;
+        let store = match store_of(cx_engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -368,18 +394,22 @@ fn h_watch_add<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
             return ToolOutcome::err("watch_add: only http(s) URLs can be watched");
         }
         let note = args.get("note").and_then(Value::as_str).unwrap_or("");
-        let generation = engine.current_generation();
+        let generation = cx_engine.current_generation();
         store_outcome(
             store
                 .watch_add(url, note, generation)
                 .map(|id| json!({ "id": id, "created_gen": generation })),
         )
-    })
+    }
 }
 
-fn h_watch_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
+fn h_watch_add<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(watch_add_impl(cx.engine, args))
+}
+
+fn h_watch_list<'a>(cx: &'a CallCtx<'a>, _args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = match store_of(engine) {
+        let store = match store_of(cx.engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -387,9 +417,9 @@ fn h_watch_list<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_watch_remove<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
+fn h_watch_remove<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = match store_of(engine) {
+        let store = match store_of(cx.engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -404,9 +434,9 @@ fn h_watch_remove<'a>(engine: &'a Engine, args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
-fn h_store_export<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
+fn h_store_export<'a>(cx: &'a CallCtx<'a>, _args: &'a Value) -> ToolFuture<'a> {
     Box::pin(async move {
-        let store = match store_of(engine) {
+        let store = match store_of(cx.engine) {
             Ok(store) => store,
             Err(fault) => return fault,
         };
@@ -417,7 +447,136 @@ fn h_store_export<'a>(engine: &'a Engine, _args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
+// ── store dispatch trio (the kind-keyed default surface) ──────────────
+
+fn h_store_put<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
+        let record = args.get("record").cloned().unwrap_or(json!({}));
+        match kind {
+            "reminder" => reminder_add_impl(cx.engine, &record).await,
+            "countdown" => countdown_add_impl(cx.engine, &record).await,
+            "watch" => watch_add_impl(cx.engine, &record).await,
+            other => ToolOutcome::err(format!(
+                "store_put: unknown kind {other:?} (reminder | countdown | watch)"
+            )),
+        }
+    })
+}
+
+fn h_store_query<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
+        let store = match store_of(cx.engine) {
+            Ok(store) => store,
+            Err(fault) => return fault,
+        };
+        match kind {
+            "reminder" => store_outcome(store.reminders_open()),
+            "countdown" => store_outcome(store.countdowns_active()),
+            "watch" => store_outcome(store.watches()),
+            // The sovereignty view: everything, as plain JSON.
+            "all" => match store.export_json() {
+                Ok(json) => ToolOutcome::ok(json),
+                Err(e) => ToolOutcome::err(e.to_string()),
+            },
+            other => ToolOutcome::err(format!(
+                "store_query: unknown kind {other:?} (reminder | countdown | watch | all)"
+            )),
+        }
+    })
+}
+
+fn h_store_close<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "reminder" => h_reminder_done(cx, args).await,
+            "countdown" => h_countdown_retire(cx, args).await,
+            "watch" => h_watch_remove(cx, args).await,
+            other => ToolOutcome::err(format!(
+                "store_close: unknown kind {other:?} (reminder | countdown | watch)"
+            )),
+        }
+    })
+}
+
+// ── discovery trio (the constant-size long tail) ───────────────────────
+
+fn h_tool_search<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        let matches: Vec<Value> = registry()
+            .specs()
+            .filter(|spec| !cx.policy.denies(spec.facet))
+            .filter(|spec| {
+                terms.is_empty()
+                    || terms.iter().all(|t| {
+                        spec.name.to_lowercase().contains(t)
+                            || spec.description.to_lowercase().contains(t)
+                    })
+            })
+            .map(|spec| {
+                let summary = spec.description.split('.').next().unwrap_or("").trim();
+                json!({
+                    "name": spec.name,
+                    "summary": summary,
+                    "facet": spec.facet,
+                    "mutates": spec.mutates,
+                })
+            })
+            .collect();
+        ToolOutcome::ok(json!({ "tools": matches }).to_string())
+    })
+}
+
+fn h_tool_describe<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let Some(name) = args.get("name").and_then(Value::as_str) else {
+            return ToolOutcome::err("tool_describe requires `name`");
+        };
+        match registry().specs().find(|s| s.name == name) {
+            Some(spec) if !cx.policy.denies(spec.facet) => ToolOutcome::ok(
+                json!({
+                    "name": spec.name,
+                    "description": spec.description,
+                    "inputSchema": spec.input_schema,
+                    "mutates": spec.mutates,
+                    "facet": spec.facet,
+                })
+                .to_string(),
+            ),
+            _ => ToolOutcome::err(format!("unknown tool: {name}")),
+        }
+    })
+}
+
+fn h_tool_invoke<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let Some(name) = args.get("name").and_then(Value::as_str) else {
+            return ToolOutcome::err("tool_invoke requires `name`");
+        };
+        // One-level guard: the discovery trio is not re-entrant.
+        if matches!(name, "tool_invoke" | "tool_search" | "tool_describe") {
+            return ToolOutcome::err("tool_invoke cannot invoke the discovery tools");
+        }
+        let inner = args.get("arguments").cloned().unwrap_or(json!({}));
+        registry().call(cx.engine, cx.policy, name, &inner).await
+    })
+}
+
 // ── the registry ───────────────────────────────────────────────────────
+
+/// The default-surface budget (#32): the number of tools the DEFAULT facet
+/// policy may list, pinned by CI. Growing it is a deliberate change to this
+/// constant with its own justification — never a side effect of a feature.
+/// (Room is reserved within the budget for F4's `routine_eval`.)
+pub const DEFAULT_TOOL_BUDGET: usize = 12;
 
 #[allow(clippy::too_many_lines)] // a flat, ordered spec table reads best whole
 fn build_registry() -> ToolRegistry {
@@ -521,7 +680,7 @@ fn build_registry() -> ToolRegistry {
                     "required": ["text"]
                 }),
                 mutates: true,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_reminder_add,
         },
@@ -531,7 +690,7 @@ fn build_registry() -> ToolRegistry {
                 description: "List open reminders from the agent state store.",
                 input_schema: json!({ "type": "object", "properties": {} }),
                 mutates: false,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_reminder_list,
         },
@@ -545,7 +704,7 @@ fn build_registry() -> ToolRegistry {
                     "required": ["id"]
                 }),
                 mutates: true,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_reminder_done,
         },
@@ -567,7 +726,7 @@ fn build_registry() -> ToolRegistry {
                     "required": ["label", "start_date", "end_date"]
                 }),
                 mutates: true,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_countdown_add,
         },
@@ -581,7 +740,7 @@ fn build_registry() -> ToolRegistry {
                     "required": ["id"]
                 }),
                 mutates: true,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_countdown_retire,
         },
@@ -599,7 +758,7 @@ fn build_registry() -> ToolRegistry {
                     "required": ["url"]
                 }),
                 mutates: true,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_watch_add,
         },
@@ -609,7 +768,7 @@ fn build_registry() -> ToolRegistry {
                 description: "List registered URL watches.",
                 input_schema: json!({ "type": "object", "properties": {} }),
                 mutates: false,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_watch_list,
         },
@@ -623,9 +782,123 @@ fn build_registry() -> ToolRegistry {
                     "required": ["id"]
                 }),
                 mutates: true,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_watch_remove,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "store_put",
+                description: "Register a record in the agent state store. Kind-keyed: \
+                    kind=reminder {text, due?, recurrence?} | countdown {label, \
+                    start_date, end_date, total_work_days?, display?} | watch {url, \
+                    note?}. Returns {id, created_gen}.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string",
+                                  "enum": ["reminder", "countdown", "watch"] },
+                        "record": { "type": "object",
+                                    "description": "kind-specific fields; see tool_describe of the classic tool for full schemas" }
+                    },
+                    "required": ["kind", "record"]
+                }),
+                mutates: true,
+                facet: "store",
+            },
+            handler: h_store_put,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "store_query",
+                description: "Read from the agent state store. kind=reminder (open) | \
+                    countdown (active) | watch (all) | all (full plain-JSON export — \
+                    the sovereignty view).",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string",
+                                  "enum": ["reminder", "countdown", "watch", "all"] }
+                    },
+                    "required": ["kind"]
+                }),
+                mutates: false,
+                facet: "store",
+            },
+            handler: h_store_query,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "store_close",
+                description: "Close a record by id: kind=reminder (mark done) | \
+                    countdown (retire) | watch (remove).",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string",
+                                  "enum": ["reminder", "countdown", "watch"] },
+                        "id": { "type": "integer" }
+                    },
+                    "required": ["kind", "id"]
+                }),
+                mutates: true,
+                facet: "store",
+            },
+            handler: h_store_close,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "tool_search",
+                description: "Search the FULL tool registry (all facets, including \
+                    tools not in tools/list) by keywords. Returns [{name, summary, \
+                    facet, mutates}]. Use tool_describe for a schema, tool_invoke to \
+                    call.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string",
+                                   "description": "keywords; empty lists everything" }
+                    }
+                }),
+                mutates: false,
+                facet: "core",
+            },
+            handler: h_tool_search,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "tool_describe",
+                description: "Full spec of one registered tool (any facet): \
+                    description, inputSchema, mutates, facet. Schemas are disclosed \
+                    at the moment of need, never preloaded.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "name": { "type": "string" } },
+                    "required": ["name"]
+                }),
+                mutates: false,
+                facet: "core",
+            },
+            handler: h_tool_describe,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "tool_invoke",
+                description: "Invoke any registered tool by name (any facet not \
+                    denied), with validated dispatch — the long tail of the surface \
+                    without the schema cost in tools/list.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "arguments": { "type": "object" }
+                    },
+                    "required": ["name"]
+                }),
+                mutates: true, // can reach mutating tools
+                facet: "core",
+            },
+            handler: h_tool_invoke,
         },
         ToolEntry {
             spec: ToolSpec {
@@ -634,7 +907,7 @@ fn build_registry() -> ToolRegistry {
                     (sovereignty: the content is never locked into SQLite).",
                 input_schema: json!({ "type": "object", "properties": {} }),
                 mutates: false,
-                facet: "store",
+                facet: "store-classic",
             },
             handler: h_store_export,
         },
@@ -657,15 +930,21 @@ mod tests {
             ("step_run", true, "core"),
             ("report_get", false, "core"),
             ("steps_list", false, "core"),
-            ("reminder_add", true, "store"),
-            ("reminder_list", false, "store"),
-            ("reminder_done", true, "store"),
-            ("countdown_add", true, "store"),
-            ("countdown_retire", true, "store"),
-            ("watch_add", true, "store"),
-            ("watch_list", false, "store"),
-            ("watch_remove", true, "store"),
-            ("store_export", false, "store"),
+            ("reminder_add", true, "store-classic"),
+            ("reminder_list", false, "store-classic"),
+            ("reminder_done", true, "store-classic"),
+            ("countdown_add", true, "store-classic"),
+            ("countdown_retire", true, "store-classic"),
+            ("watch_add", true, "store-classic"),
+            ("watch_list", false, "store-classic"),
+            ("watch_remove", true, "store-classic"),
+            ("store_put", true, "store"),
+            ("store_query", false, "store"),
+            ("store_close", true, "store"),
+            ("tool_search", false, "core"),
+            ("tool_describe", false, "core"),
+            ("tool_invoke", true, "core"),
+            ("store_export", false, "store-classic"),
         ];
         let actual: Vec<(&str, bool, &str)> = registry()
             .specs()
@@ -674,6 +953,42 @@ mod tests {
         assert_eq!(
             actual, expected,
             "the tool surface policy changed — review!"
+        );
+    }
+
+    /// THE BUDGET PIN (#32): the default facet policy lists at most
+    /// DEFAULT_TOOL_BUDGET tools, with the exact set pinned. Progressive
+    /// disclosure is enforced here, not hoped for.
+    #[test]
+    fn default_surface_fits_the_budget() {
+        let policy =
+            crate::facets::FacetPolicy::resolve(None, &modulex_core::config::McpConfig::default());
+        let listed: Vec<&str> = registry()
+            .specs()
+            .filter(|s| policy.exposes(s.facet))
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            listed.len() <= DEFAULT_TOOL_BUDGET,
+            "default surface ({}) exceeds the budget ({DEFAULT_TOOL_BUDGET}): {listed:?}",
+            listed.len()
+        );
+        assert_eq!(
+            listed,
+            vec![
+                "routine_run",
+                "routine_list",
+                "step_run",
+                "report_get",
+                "steps_list",
+                "store_put",
+                "store_query",
+                "store_close",
+                "tool_search",
+                "tool_describe",
+                "tool_invoke",
+            ],
+            "the default index changed — a deliberate, reviewed event"
         );
     }
 

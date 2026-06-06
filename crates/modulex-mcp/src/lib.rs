@@ -15,7 +15,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod facets;
 pub mod server;
 pub mod tools;
 
+pub use facets::FacetPolicy;
 pub use server::Server;
