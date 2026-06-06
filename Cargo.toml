@@ -4,6 +4,7 @@ members = [
     "crates/modulex-core",
     "crates/modulex-cli",
     "crates/modulex-mcp",
+    "crates/modulex-plugin-health",
     "crates/modulex-py",
 ]
 

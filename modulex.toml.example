@@ -140,6 +140,24 @@ type = "board-scan"
 name = "chores"
 type = "chores-check"
 
+# --- Phase: host health (modulex-plugin-health, default feature) ---
+
+[[routines.morning.steps]]
+name = "disk"
+type = "disk-check"
+mounts = ["/"]
+warn_percent = 80
+crit_percent = 90
+
+[[routines.morning.steps]]
+name = "gpu"
+type = "gpu-check" # nvidia-smi → /proc driver → lspci fallback chain
+
+# [[routines.morning.steps]]
+# name = "services"
+# type = "service-check"
+# services = ["sshd"]
+
 # --- Phase: external tools ---
 
 # An AI harness in an enclave: flags in, one JSON object out.

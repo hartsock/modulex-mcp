@@ -114,12 +114,21 @@ enum StoreAction {
     },
 }
 
+/// The full step registry: core builtins + feature-enabled plugins.
+fn full_registry() -> modulex_core::StepRegistry {
+    #[allow(unused_mut)] // mut needed only when a plugin feature is on
+    let mut registry = builtin_registry();
+    #[cfg(feature = "plugin-health")]
+    modulex_plugin_health::register(&mut registry);
+    registry
+}
+
 fn load(config_path: Option<&PathBuf>) -> anyhow::Result<(Engine, PathBuf, String)> {
     let (config, path) = match config_path {
         Some(path) => (Config::from_path(path)?, path.clone()),
         None => Config::load()?,
     };
-    let registry = builtin_registry();
+    let registry = full_registry();
     let declared = config.declared_programs(&registry);
     let granted = GrantedCaveats::load(config.caveats.as_ref(), declared)?;
     let banner = granted.banner();
@@ -213,7 +222,7 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
         Command::Doctor => {
             println!("config: {}", config_path.display());
             println!("{banner}");
-            let registry = builtin_registry();
+            let registry = full_registry();
             let declared = engine.config().declared_programs(&registry);
             if declared.is_empty() {
                 println!("declared programs: (none — only pure steps configured)");

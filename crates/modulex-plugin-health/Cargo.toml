@@ -1,0 +1,22 @@
+[package]
+name = "modulex-plugin-health"
+description = "Host health steps for the modulex routine engine: disk, services, GPU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+modulex-core = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+agent-bridle-core = { workspace = true }
+# Schema validation for the plugin-local data-contract harness (tests only).
+jsonschema = { version = "0.26", default-features = false }
+modulex-core = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true }
+toml = { workspace = true }

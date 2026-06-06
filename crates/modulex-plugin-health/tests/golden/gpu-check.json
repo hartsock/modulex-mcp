@@ -1,0 +1,59 @@
+{
+  "properties": {
+    "detail": {
+      "type": "string"
+    },
+    "gpus": {
+      "items": {
+        "properties": {
+          "memory_total_mib": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "memory_used_mib": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "temperature_c": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "utilization_percent": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "tier": {
+      "description": "which probe tier answered",
+      "enum": [
+        "nvidia-smi",
+        "proc",
+        "lspci",
+        "none"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "tier"
+  ],
+  "type": "object"
+}

@@ -56,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
         Some(path) => Config::from_path(path)?,
         None => Config::load()?.0,
     };
-    let registry = builtin_registry();
+    // Core builtins + feature-enabled plugins.
+    #[allow(unused_mut)] // mut needed only when a plugin feature is on
+    let mut registry = builtin_registry();
+    #[cfg(feature = "plugin-health")]
+    modulex_plugin_health::register(&mut registry);
     let declared = config.declared_programs(&registry);
     let granted = GrantedCaveats::load(config.caveats.as_ref(), declared)?;
     // Provenance to stderr — stdout belongs to the protocol.

@@ -1,0 +1,30 @@
+{
+  "properties": {
+    "services": {
+      "items": {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "state": {
+            "description": "systemd state token (active, inactive, failed, ...) or 'error'",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "services"
+  ],
+  "type": "object"
+}

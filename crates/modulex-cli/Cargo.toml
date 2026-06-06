@@ -12,8 +12,15 @@ repository.workspace = true
 name = "modulex"
 path = "src/main.rs"
 
+[features]
+# Plugins are feature-gated (FOUNDATION pillar C): default builds carry the
+# reference plugin; --no-default-features builds the lean engine.
+default = ["plugin-health"]
+plugin-health = ["dep:modulex-plugin-health"]
+
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
 modulex-core = { workspace = true }
+modulex-plugin-health = { path = "../modulex-plugin-health", version = "=0.1.0", optional = true }
 tokio = { workspace = true }
