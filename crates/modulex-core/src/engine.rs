@@ -88,17 +88,34 @@ pub struct Engine {
     spawner: Arc<dyn Spawner>,
     generation: AtomicU64,
     reports: Mutex<VecDeque<Report>>,
+    store: Option<Arc<crate::store::Store>>,
 }
 
 impl Engine {
     /// An engine over the given config, registry, and grant, spawning real
-    /// processes.
+    /// processes. Opens (creating if needed) the agent state store at the
+    /// configured path; on failure the engine still runs, store-backed
+    /// steps soft-skip, and a warning goes to stderr.
     #[must_use]
     pub fn new(config: Config, registry: StepRegistry, granted: Caveats) -> Self {
-        Self::with_spawner(config, registry, granted, Arc::new(TokioSpawner))
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let path = crate::store::Store::resolve_path(
+            (!config.store.path.is_empty()).then_some(config.store.path.as_str()),
+            home.as_deref(),
+        );
+        let store = match crate::store::Store::open(&path) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                eprintln!(
+                    "modulex: agent state store unavailable ({e}) — store-backed steps will skip"
+                );
+                None
+            }
+        };
+        Self::with_spawner(config, registry, granted, Arc::new(TokioSpawner)).with_store_opt(store)
     }
 
-    /// As [`Engine::new`] with an injected [`Spawner`] (tests).
+    /// As [`Engine::new`] with an injected [`Spawner`] and NO store (tests).
     #[must_use]
     pub fn with_spawner(
         config: Config,
@@ -113,7 +130,38 @@ impl Engine {
             spawner,
             generation: AtomicU64::new(0),
             reports: Mutex::new(VecDeque::new()),
+            store: None,
         }
+    }
+
+    /// Attach an agent state store (builder). Seeds the generation counter
+    /// from the store's persisted value, so generations stay monotonic
+    /// across process restarts.
+    #[must_use]
+    pub fn with_store(self, store: Arc<crate::store::Store>) -> Self {
+        self.with_store_opt(Some(store))
+    }
+
+    fn with_store_opt(mut self, store: Option<Arc<crate::store::Store>>) -> Self {
+        if let Some(store) = &store {
+            self.generation
+                .store(store.last_generation(), Ordering::Release);
+        }
+        self.store = store;
+        self
+    }
+
+    /// The agent state store, when available.
+    #[must_use]
+    pub fn store(&self) -> Option<&Arc<crate::store::Store>> {
+        self.store.as_ref()
+    }
+
+    /// The current generation: the identity of the LAST completed (or
+    /// in-flight) run. Mutation stamps use this — "registered after run N".
+    #[must_use]
+    pub fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// The loaded configuration.
@@ -255,6 +303,13 @@ impl Engine {
         }
 
         report.finalize();
+        // Persist the generation so it stays monotonic across restarts
+        // (best effort — a read-only disk shouldn't kill the report).
+        if let Some(store) = &self.store {
+            if let Err(e) = store.set_last_generation(generation) {
+                eprintln!("modulex: could not persist generation {generation}: {e}");
+            }
+        }
         let mut reports = self.reports.lock().expect("report store poisoned");
         while reports.len() >= REPORT_RETENTION {
             reports.pop_front();
@@ -290,6 +345,7 @@ impl Engine {
             generation,
             exec: exec.clone(),
             prior: prior.to_vec(),
+            store: self.store.clone(),
         }
     }
 
@@ -307,6 +363,7 @@ impl Engine {
             generation,
             exec: exec.clone(),
             prior,
+            store: self.store.clone(),
         };
         run_with(self.registry.get(&step.step_type).as_deref(), step, &cx).await
     }
