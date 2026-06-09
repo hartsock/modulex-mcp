@@ -1,0 +1,64 @@
+{
+  "properties": {
+    "lanes": {
+      "items": {
+        "properties": {
+          "cards": {
+            "items": {
+              "properties": {
+                "blocked": {
+                  "type": "boolean"
+                },
+                "card_id": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "summary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "card_id",
+                "summary"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "lane": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "lane",
+          "cards"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "open": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "lanes",
+    "open"
+  ],
+  "type": "object"
+}

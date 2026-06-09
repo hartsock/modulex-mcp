@@ -14,8 +14,9 @@
 //! | `gitlab-mr-review` | [`gitlab`] | glab |
 //! | `gitlab-group-mrs` | [`gitlab`] | glab |
 //! | `mr-sla-check` | [`gitlab`] | — (derived from prior results) |
-//! | `board-scan` | [`board`] | — |
+//! | `board-scan` | [`board`] | — (filesystem lane dirs) |
 //! | `chores-check` | [`board`] | — |
+//! | `board` | [`board`] | — (store-backed cards) |
 //! | `python` | [`python`] | the configured interpreter (plugin protocol) |
 //! | `reminders` | [`reminders`] | — (agent state store) |
 //! | `url-watch` | [`web`] | — (leashed in-proc fetch; feature `web`) |
@@ -53,6 +54,7 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(gitlab::MrSlaCheck));
     registry.register(Arc::new(board::BoardScan));
     registry.register(Arc::new(board::ChoresCheck));
+    registry.register(Arc::new(board::Board));
     registry.register(Arc::new(python::PythonPlugin));
     registry.register(Arc::new(reminders::Reminders));
     #[cfg(feature = "web")]
@@ -82,6 +84,7 @@ mod tests {
             "mr-sla-check",
             "board-scan",
             "chores-check",
+            "board",
             "python",
             "reminders",
         ] {
