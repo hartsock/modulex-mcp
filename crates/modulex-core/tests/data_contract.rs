@@ -159,6 +159,10 @@ type = "chores-check"
 [[routines.contract.steps]]
 name = "agenda"
 type = "reminders"
+
+[[routines.contract.steps]]
+name = "cards"
+type = "board"
 "#;
 
 /// Guarantee 2: executed builtins emit `data` that validates against their
@@ -194,6 +198,18 @@ async fn executed_step_data_validates_against_schema() {
     let store = Arc::new(Store::in_memory().unwrap());
     store
         .reminder_add("validate me", Some("2999-01-01"), None, 0)
+        .unwrap();
+    store
+        .card_add(
+            &modulex_core::store::CardInput {
+                card_id: "contract-1".into(),
+                project: "p".into(),
+                lane: "p0".into(),
+                summary: "validate the board step".into(),
+                ..Default::default()
+            },
+            0,
+        )
         .unwrap();
     let engine = Engine::with_spawner(config, registry, granted, spawner).with_store(store);
 

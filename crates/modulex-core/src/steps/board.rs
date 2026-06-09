@@ -1,9 +1,11 @@
-//! Filesystem board steps: `board-scan` and `chores-check`.
+//! Board steps.
 //!
-//! Pure directory scans — no subprocesses. `board-scan` lists `*.md` tasks
-//! per configured lane. `chores-check` looks for `due: YYYY-MM-DD` lines in
-//! the chores directory's markdown files and reports what's due or overdue
-//! (today's date is display math, never coordination).
+//! - `board-scan` and `chores-check` are pure **filesystem** directory scans —
+//!   no subprocesses, no store. `board-scan` lists `*.md` task stems per
+//!   configured lane; `chores-check` reports `due:` lines that are due/overdue.
+//! - `board` is the **store-backed** view: open cards grouped by lane from the
+//!   agent state store (the operational knowledge board). It is the counterpart
+//!   of `board-scan` for boards synced into the store via `import_dir`.
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -11,6 +13,7 @@ use chrono::NaiveDate;
 use crate::config::{expand_tilde, StepSpec};
 use crate::report::StepResult;
 use crate::step::{RunContext, StepHandler};
+use crate::store::Card;
 
 /// `board-scan`: `### lane (N tasks)` plus the task stems, per lane.
 pub struct BoardScan;
@@ -287,6 +290,153 @@ fn render_chores(items: &[DueItem], today: NaiveDate) -> String {
     lines.join("\n")
 }
 
+/// The default lanes shown when a `board` step has no `lane` param: the open
+/// work lanes, in priority order (closed lanes are surfaced only on request).
+const OPEN_LANES: &[&str] = &["p0", "p1", "p2"];
+
+/// `board`: open cards grouped by lane, from the agent state store.
+///
+/// Params (all optional): `lane` (a single lane to show), `project` (filter).
+/// With no `lane`, shows the open lanes (`p0`/`p1`/`p2`).
+pub struct Board;
+
+#[async_trait]
+impl StepHandler for Board {
+    fn type_name(&self) -> &'static str {
+        "board"
+    }
+
+    fn description(&self) -> &'static str {
+        "Open knowledge-board cards grouped by lane, from the agent state store"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["lanes", "open"],
+            "properties": {
+                "open": { "type": "integer", "minimum": 0 },
+                "lanes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["lane", "cards"],
+                        "properties": {
+                            "lane": { "type": "string" },
+                            "cards": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["card_id", "summary"],
+                                    "properties": {
+                                        "card_id": { "type": "string" },
+                                        "project": { "type": "string" },
+                                        "summary": { "type": "string" },
+                                        "status":  { "type": ["string", "null"] },
+                                        "size":    { "type": ["string", "null"] },
+                                        "blocked": { "type": "boolean" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
+        vec![]
+    }
+
+    async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
+        let Some(store) = &cx.store else {
+            return StepResult::skip(&spec.name, &spec.step_type, "agent state store unavailable");
+        };
+        let lane = spec.param_str("lane");
+        let project = spec.param_str("project");
+
+        if cx.dry_run {
+            return StepResult::ok(
+                &spec.name,
+                &spec.step_type,
+                "[dry-run] would list open board cards from the store",
+            );
+        }
+
+        let cards = match store.cards_query(project, None, lane) {
+            Ok(cards) => cards,
+            Err(e) => return StepResult::fail(&spec.name, &spec.step_type, e.to_string()),
+        };
+
+        // Which lanes to show, in order: the requested one, else the open lanes.
+        let lanes: Vec<String> = match lane {
+            Some(l) => vec![l.to_string()],
+            None => OPEN_LANES.iter().map(ToString::to_string).collect(),
+        };
+
+        let mut result = StepResult::ok(&spec.name, &spec.step_type, render(&cards, &lanes));
+        result.data = Some(board_data(&cards, &lanes));
+        result
+    }
+}
+
+/// Cards in a given lane, preserving store order.
+fn cards_in<'a>(cards: &'a [Card], lane: &str) -> Vec<&'a Card> {
+    cards.iter().filter(|c| c.lane == lane).collect()
+}
+
+/// Typed payload for the data contract.
+fn board_data(cards: &[Card], lanes: &[String]) -> serde_json::Value {
+    let lane_views: Vec<serde_json::Value> = lanes
+        .iter()
+        .map(|lane| {
+            let entries: Vec<serde_json::Value> = cards_in(cards, lane)
+                .into_iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "card_id": c.card_id,
+                        "project": c.project,
+                        "summary": c.summary,
+                        "status": c.status,
+                        "size": c.size,
+                        "blocked": c.closed_gen.is_none()
+                            && c.refs.iter().any(|r| r.kind == "blocked_on"),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "lane": lane, "cards": entries })
+        })
+        .collect();
+    let open = cards
+        .iter()
+        .filter(|c| lanes.iter().any(|l| l == &c.lane))
+        .count();
+    serde_json::json!({ "lanes": lane_views, "open": open })
+}
+
+/// Pure renderer, factored so tests pin the output shape.
+fn render(cards: &[Card], lanes: &[String]) -> String {
+    let mut lines = Vec::new();
+    for lane in lanes {
+        let entries = cards_in(cards, lane);
+        lines.push(format!("### {lane} ({} cards)", entries.len()));
+        for c in entries {
+            let blocked = if c.refs.iter().any(|r| r.kind == "blocked_on") {
+                " [blocked]"
+            } else {
+                ""
+            };
+            lines.push(format!("  - {}: {}{blocked}", c.card_id, c.summary));
+        }
+    }
+    if lines.is_empty() {
+        "(no board cards)".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -296,6 +446,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::exec::test_support::{gate_with, MockSpawner};
+    use crate::store::{CardInput, Store};
 
     fn cx_with(config: Config) -> RunContext {
         RunContext {
@@ -406,5 +557,108 @@ mod tests {
         let spec: StepSpec = toml::from_str("name=\"c\"\ntype=\"chores-check\"").unwrap();
         let result = ChoresCheck.run(&spec, &cx_with(config)).await;
         assert!(result.skipped);
+    }
+
+    // ── board (store-backed) ───────────────────────────────────────────
+
+    fn cx_with_store(store: Option<Arc<Store>>) -> RunContext {
+        RunContext {
+            config: Arc::new(Config::default()),
+            dry_run: false,
+            generation: 1,
+            exec: gate_with(&Caveats::top(), Arc::new(MockSpawner::default())),
+            prior: Vec::new(),
+            store,
+        }
+    }
+
+    fn seed(store: &Store, card_id: &str, lane: &str, summary: &str) {
+        store
+            .card_add(
+                &CardInput {
+                    card_id: card_id.into(),
+                    project: "homelab".into(),
+                    lane: lane.into(),
+                    summary: summary.into(),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn board_step_missing_store_soft_skips() {
+        let spec: StepSpec = toml::from_str("name=\"b\"\ntype=\"board\"").unwrap();
+        let result = Board.run(&spec, &cx_with_store(None)).await;
+        assert!(result.skipped);
+    }
+
+    #[tokio::test]
+    async fn board_step_lists_open_lanes_only() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        seed(&store, "a", "p0", "active thing");
+        seed(&store, "b", "p2", "backlog thing");
+        seed(&store, "c", "done", "finished thing");
+
+        let spec: StepSpec = toml::from_str("name=\"b\"\ntype=\"board\"").unwrap();
+        let result = Board.run(&spec, &cx_with_store(Some(store))).await;
+        assert!(result.success);
+        assert!(result.output.contains("### p0 (1 cards)"));
+        assert!(result.output.contains("active thing"));
+        assert!(result.output.contains("### p2 (1 cards)"));
+        assert!(
+            !result.output.contains("finished thing"),
+            "done lane excluded by default"
+        );
+
+        let data = result.data.unwrap();
+        assert_eq!(data["open"], 2, "p0 + p2, not done");
+    }
+
+    #[tokio::test]
+    async fn board_step_honors_lane_param() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        seed(&store, "a", "p0", "active thing");
+        seed(&store, "c", "done", "finished thing");
+
+        let spec: StepSpec = toml::from_str("name=\"b\"\ntype=\"board\"\nlane=\"done\"").unwrap();
+        let result = Board.run(&spec, &cx_with_store(Some(store))).await;
+        assert!(result.output.contains("### done (1 cards)"));
+        assert!(result.output.contains("finished thing"));
+    }
+
+    #[test]
+    fn board_render_flags_blocked_cards() {
+        let cards = vec![Card {
+            id: 1,
+            card_id: "x".into(),
+            project: "p".into(),
+            lane: "p0".into(),
+            context: String::new(),
+            summary: "do the thing".into(),
+            size: None,
+            status: Some("blocked".into()),
+            recurs: None,
+            expires: None,
+            created: None,
+            updated: None,
+            body: String::new(),
+            author: None,
+            source: None,
+            source_id: None,
+            created_gen: 1,
+            updated_gen: 1,
+            closed_gen: None,
+            refs: vec![crate::store::CardRef {
+                kind: "blocked_on".into(),
+                label: String::new(),
+                value: "https://x/1".into(),
+                ordinal: 0,
+            }],
+        }];
+        let body = render(&cards, &["p0".to_string()]);
+        assert!(body.contains("### p0 (1 cards)"));
+        assert!(body.contains("- x: do the thing [blocked]"));
     }
 }
