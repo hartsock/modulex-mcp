@@ -1,0 +1,58 @@
+{
+  "properties": {
+    "projects": {
+      "items": {
+        "properties": {
+          "active_p0": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "backlog_p2": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "blocked": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "open_prs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "project": {
+            "type": "string"
+          },
+          "pulse_closed_7d": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "auth-failed",
+              "error"
+            ],
+            "type": "string"
+          },
+          "up_next_p1": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "projects"
+  ],
+  "type": "object"
+}
