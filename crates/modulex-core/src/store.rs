@@ -949,7 +949,111 @@ impl Store {
         }
         Ok(())
     }
+
+    // ── board directory sync (markdown <-> cards) ──────────────────────
+
+    /// Import a board directory tree into the cards table. Walks
+    /// `<root>/[<context>/]<lane>/*.md` (lanes `p0|p1|p2|done|dropped`),
+    /// parses each file, derives lane/context from the path, and upserts by
+    /// `card_id`. Follows symlinks (the lane-view convention) but dedups by
+    /// `card_id`, so a source file and its lane symlink import once.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure (parse/read errors are counted as
+    /// `skipped`, never fatal).
+    pub fn import_dir(&self, root: &Path, generation: u64) -> Result<ImportReport, StoreError> {
+        let mut report = ImportReport::default();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // (context, lane, dir)
+        let mut lane_dirs: Vec<(String, String, PathBuf)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if BOARD_LANES.contains(&name.as_str()) {
+                    lane_dirs.push((String::new(), name, path));
+                } else if let Ok(sub) = std::fs::read_dir(&path) {
+                    for s in sub.filter_map(Result::ok) {
+                        let sp = s.path();
+                        let sname = s.file_name().to_string_lossy().into_owned();
+                        if sp.is_dir() && BOARD_LANES.contains(&sname.as_str()) {
+                            lane_dirs.push((name.clone(), sname, sp));
+                        }
+                    }
+                }
+            }
+        }
+        lane_dirs.sort();
+
+        for (context, lane, dir) in lane_dirs {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .map(|es| {
+                    es.filter_map(Result::ok)
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort();
+            for path in files {
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    report.skipped += 1;
+                    continue;
+                };
+                let mut input = match crate::board_md::card_from_markdown(&text) {
+                    Ok(input) => input,
+                    Err(_) => {
+                        report.skipped += 1;
+                        continue;
+                    }
+                };
+                if !seen.insert(input.card_id.clone()) {
+                    report.skipped += 1; // a source file and its symlink
+                    continue;
+                }
+                input.lane.clone_from(&lane);
+                input.context.clone_from(&context);
+                let existed = self.card_by_card_id(&input.card_id)?.is_some();
+                self.card_add(&input, generation)?;
+                if existed {
+                    report.updated += 1;
+                } else {
+                    report.added += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Export every card to `<root>/<context>/<lane>/<card_id>.md` as flat real
+    /// files (not symlink lane-views). Non-destructive: writes/overwrites the
+    /// files it owns, never deletes others. Returns the number written.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] when a directory or file cannot be written.
+    pub fn export_dir(&self, root: &Path) -> Result<usize, StoreError> {
+        let cards = self.cards_query(None, None, None)?;
+        for card in &cards {
+            let dir = if card.context.is_empty() {
+                root.join(&card.lane)
+            } else {
+                root.join(&card.context).join(&card.lane)
+            };
+            std::fs::create_dir_all(&dir).map_err(|e| StoreError::Io(dir.clone(), e))?;
+            let file = dir.join(format!("{}.md", card.card_id));
+            let markdown = crate::board_md::card_to_markdown(card);
+            std::fs::write(&file, markdown).map_err(|e| StoreError::Io(file.clone(), e))?;
+        }
+        Ok(cards.len())
+    }
 }
+
+/// The recognized board lanes, in priority order.
+const BOARD_LANES: &[&str] = &["p0", "p1", "p2", "done", "dropped"];
 
 /// Column list for `cards` SELECTs, matching [`row_to_card`]'s field order.
 const CARD_COLS: &str = "rowid_id, card_id, project, lane, context, summary, size, status, \
@@ -1466,5 +1570,49 @@ mod tests {
             "closed lane re-derives closed_gen on import"
         );
         assert_eq!(b.card_by_card_id("c-1").unwrap().unwrap().refs.len(), 1);
+    }
+
+    #[test]
+    fn dir_sync_round_trips() {
+        let root = std::env::temp_dir().join(format!(
+            "modulex-board-dir-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        // Lay out a board: a context with a lane and a card.
+        let lane = root.join("homelab").join("p0");
+        std::fs::create_dir_all(&lane).unwrap();
+        std::fs::write(
+            lane.join("vpn.md"),
+            "---\nid: homelab-2026-06-09-vpn\nproject: homelab\nsummary: renew cert\nrefs:\n  issue: https://example.com/1\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let a = Store::in_memory().unwrap();
+        let report = a.import_dir(&root, 1).unwrap();
+        assert_eq!(report.added, 1);
+        let cards = a.cards_in_lane("p0", Some("homelab")).unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].card_id, "homelab-2026-06-09-vpn");
+        assert_eq!(cards[0].refs.len(), 1);
+
+        // Export to a second tree, re-import into a fresh store: equal card set.
+        let out = root.join("export");
+        a.export_dir(&out).unwrap();
+        assert!(out
+            .join("homelab")
+            .join("p0")
+            .join("homelab-2026-06-09-vpn.md")
+            .is_file());
+
+        let b = Store::in_memory().unwrap();
+        b.import_dir(&out, 1).unwrap();
+        let bcards = b.cards_query(None, None, None).unwrap();
+        assert_eq!(bcards.len(), 1);
+        assert_eq!(bcards[0].lane, "p0");
+        assert_eq!(bcards[0].context, "homelab");
+        assert_eq!(bcards[0].summary, "renew cert");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

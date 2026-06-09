@@ -143,12 +143,22 @@ pub struct SharedConfig {
 /// Board/lane scan configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct BoardConfig {
-    /// Board root directory.
+    /// Board root directory (the filesystem `board-scan` step).
     #[serde(default)]
     pub path: String,
-    /// Lane subdirectories to scan.
+    /// Lane subdirectories to scan (the filesystem `board-scan` step).
     #[serde(default)]
     pub lanes: Vec<String>,
+    /// Board directory the store-backed card model syncs to/from
+    /// (`import_dir`/`export_dir`). May equal `path`; empty = no dir sync.
+    #[serde(default)]
+    pub sync_dir: String,
+    /// Default lane for new cards when unspecified (falls back to `p2`).
+    #[serde(default)]
+    pub default_lane: String,
+    /// Default context for new cards; empty = board root.
+    #[serde(default)]
+    pub default_context: String,
 }
 
 /// Chores manifest location.
