@@ -167,6 +167,10 @@ type = "board"
 [[routines.contract.steps]]
 name = "categorize"
 type = "mr-categorize"
+
+[[routines.contract.steps]]
+name = "momentum"
+type = "project-status"
 "#;
 
 /// Guarantee 2: executed builtins emit `data` that validates against their
@@ -198,6 +202,9 @@ async fn executed_step_data_validates_against_schema() {
         MockSpawner::ok(""),                          // glab review (none)
         MockSpawner::ok("!2 mr\n"),                   // glab groups
         MockSpawner::ok(""),                          // mr-categorize: list (no MRs)
+        MockSpawner::ok("[]"),                        // project-status: open issues
+        MockSpawner::ok("[]"),                        // project-status: open PRs
+        MockSpawner::ok("[]"),                        // project-status: closed (pulse)
     ];
     let spawner = Arc::new(MockSpawner::with_outputs(outputs));
     let store = Arc::new(Store::in_memory().unwrap());

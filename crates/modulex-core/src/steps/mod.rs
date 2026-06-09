@@ -10,6 +10,7 @@
 //! | `script` | [`script`] | the configured command |
 //! | `harness` | [`script`] | the configured command (JSON-on-stdout) |
 //! | `github-pr-scan` | [`github`] | gh |
+//! | `project-status` | [`project`] | gh (issue/pr momentum) |
 //! | `gitlab-mr-authored` | [`gitlab`] | glab |
 //! | `gitlab-mr-review` | [`gitlab`] | glab |
 //! | `gitlab-group-mrs` | [`gitlab`] | glab |
@@ -31,6 +32,7 @@ pub mod dates;
 pub mod git;
 pub mod github;
 pub mod gitlab;
+pub mod project;
 pub mod python;
 pub mod reminders;
 pub mod script;
@@ -49,6 +51,7 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(script::Script));
     registry.register(Arc::new(script::Harness));
     registry.register(Arc::new(github::GithubPrScan));
+    registry.register(Arc::new(project::ProjectStatus));
     registry.register(Arc::new(gitlab::GitlabMrAuthored));
     registry.register(Arc::new(gitlab::GitlabMrReview));
     registry.register(Arc::new(gitlab::GitlabGroupMrs));
@@ -80,6 +83,7 @@ mod tests {
             "script",
             "harness",
             "github-pr-scan",
+            "project-status",
             "gitlab-mr-authored",
             "gitlab-mr-review",
             "gitlab-group-mrs",
