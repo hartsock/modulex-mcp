@@ -30,7 +30,99 @@ use serde::{Deserialize, Serialize};
 pub const ENV_STORE: &str = "MODULEX_STORE";
 
 /// Schema version stamped via `PRAGMA user_version`.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
+
+/// The v1 schema: meta, reminders, countdowns, watches, plus the reserved
+/// `ical_feeds` / `mcp_servers` tables. Extracted to a const so [`Store::migrate`]
+/// can apply it version-guarded (a fresh DB runs v1 then v2; a v1 DB runs only v2).
+const MIGRATION_V1: &str = "BEGIN;
+     CREATE TABLE IF NOT EXISTS meta (
+       key TEXT PRIMARY KEY, value TEXT NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS reminders (
+       id INTEGER PRIMARY KEY,
+       text TEXT NOT NULL,
+       due TEXT,
+       recurrence TEXT,
+       created_gen INTEGER NOT NULL,
+       done_gen INTEGER
+     );
+     CREATE TABLE IF NOT EXISTS countdowns (
+       id INTEGER PRIMARY KEY,
+       label TEXT NOT NULL,
+       start_date TEXT NOT NULL,
+       end_date TEXT NOT NULL,
+       total_work_days INTEGER NOT NULL DEFAULT 30,
+       display TEXT NOT NULL,
+       created_gen INTEGER NOT NULL,
+       retired_gen INTEGER
+     );
+     CREATE TABLE IF NOT EXISTS watches (
+       id INTEGER PRIMARY KEY,
+       url TEXT NOT NULL,
+       note TEXT NOT NULL DEFAULT '',
+       last_hash TEXT,
+       last_seen_gen INTEGER,
+       created_gen INTEGER NOT NULL
+     );
+     -- Registered for later phases (issue #7 C/D); schema reserved
+     -- now so v1 DBs never need a migration for them.
+     CREATE TABLE IF NOT EXISTS ical_feeds (
+       id INTEGER PRIMARY KEY,
+       source TEXT NOT NULL,
+       note TEXT NOT NULL DEFAULT '',
+       created_gen INTEGER NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS mcp_servers (
+       name TEXT PRIMARY KEY,
+       command TEXT NOT NULL,
+       args_json TEXT NOT NULL DEFAULT '[]',
+       note TEXT NOT NULL DEFAULT '',
+       created_gen INTEGER NOT NULL
+     );
+     PRAGMA user_version = 1;
+     COMMIT;";
+
+/// The v2 schema: the knowledge-board `cards` table and its `card_refs`
+/// auxiliary (the `refs{label:url}` map and the `blocked_on[]` list). Dates are
+/// display-only TEXT; coordination is the `*_gen` counters. `closed_gen` is
+/// NULL while open and set when the lane is `done`/`dropped` — the card analogue
+/// of `done_gen` / `retired_gen`.
+const MIGRATION_V2: &str = "BEGIN;
+     CREATE TABLE IF NOT EXISTS cards (
+       rowid_id    INTEGER PRIMARY KEY,
+       card_id     TEXT NOT NULL UNIQUE,
+       project     TEXT NOT NULL DEFAULT '',
+       lane        TEXT NOT NULL DEFAULT 'p2',
+       context     TEXT NOT NULL DEFAULT '',
+       summary     TEXT NOT NULL DEFAULT '',
+       size        TEXT,
+       status      TEXT,
+       recurs      TEXT,
+       expires     TEXT,
+       created     TEXT,
+       updated     TEXT,
+       body        TEXT NOT NULL DEFAULT '',
+       author      TEXT,
+       source      TEXT,
+       source_id   TEXT,
+       created_gen INTEGER NOT NULL,
+       updated_gen INTEGER NOT NULL,
+       closed_gen  INTEGER
+     );
+     CREATE INDEX IF NOT EXISTS idx_cards_lane    ON cards(lane);
+     CREATE INDEX IF NOT EXISTS idx_cards_project ON cards(project);
+     CREATE INDEX IF NOT EXISTS idx_cards_status  ON cards(status);
+     CREATE TABLE IF NOT EXISTS card_refs (
+       card_rowid INTEGER NOT NULL REFERENCES cards(rowid_id) ON DELETE CASCADE,
+       kind       TEXT NOT NULL,
+       label      TEXT NOT NULL DEFAULT '',
+       value      TEXT NOT NULL,
+       ordinal    INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE INDEX IF NOT EXISTS idx_card_refs_card ON card_refs(card_rowid);
+     PRAGMA user_version = 2;
+     COMMIT;";
 
 /// Errors from store operations.
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +193,118 @@ pub struct Watch {
     pub created_gen: u64,
 }
 
+/// A reference entry on a card: either an entry of the `refs{label:url}` map
+/// (`kind = "ref"`) or an item of the `blocked_on[]` list (`kind = "blocked_on"`,
+/// ordered by `ordinal`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardRef {
+    /// `"ref"` | `"blocked_on"`.
+    pub kind: String,
+    /// Ref label (the map key); empty for `blocked_on` entries.
+    pub label: String,
+    /// The URL or path.
+    pub value: String,
+    /// Position within an ordered list (`blocked_on`); 0 for refs.
+    pub ordinal: i64,
+}
+
+/// A knowledge-board card. SQLite is the operational store; the markdown
+/// frontmatter form (see `board_md`) is the portable export.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Card {
+    /// Row id (the operational handle, like [`Reminder::id`]).
+    pub id: i64,
+    /// Stable frontmatter `id` (the markdown-sync key, unique per board).
+    pub card_id: String,
+    /// Owning project.
+    pub project: String,
+    /// Priority lane: `p0` | `p1` | `p2` | `done` | `dropped`.
+    pub lane: String,
+    /// Context bucket (`work`, `homelab`, …); empty = board root.
+    pub context: String,
+    /// One-line summary.
+    pub summary: String,
+    /// Story size (free-text, e.g. `3d`).
+    pub size: Option<String>,
+    /// Free-text status (e.g. `blocked`).
+    pub status: Option<String>,
+    /// Recurrence note (free-text, e.g. `1-2x weekly`).
+    pub recurs: Option<String>,
+    /// Sunset date (ISO, display only).
+    pub expires: Option<String>,
+    /// Creation date (ISO, display only).
+    pub created: Option<String>,
+    /// Last-updated date (ISO, display only).
+    pub updated: Option<String>,
+    /// Markdown body after the frontmatter.
+    pub body: String,
+    /// Scribe-ownership field (preserved on round-trip).
+    pub author: Option<String>,
+    /// Provenance source (preserved on round-trip).
+    pub source: Option<String>,
+    /// Provenance source id (preserved on round-trip).
+    pub source_id: Option<String>,
+    /// Engine generation when created.
+    pub created_gen: u64,
+    /// Engine generation of the last update.
+    pub updated_gen: u64,
+    /// Engine generation when closed (`None` = open; set when lane is
+    /// `done`/`dropped`).
+    pub closed_gen: Option<u64>,
+    /// Refs and blocked-on entries, in stable order.
+    #[serde(default)]
+    pub refs: Vec<CardRef>,
+}
+
+/// Fields for creating or updating a card — no engine-managed ids/generations.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CardInput {
+    /// Stable frontmatter `id`.
+    pub card_id: String,
+    /// Owning project.
+    pub project: String,
+    /// Priority lane.
+    pub lane: String,
+    /// Context bucket; empty = board root.
+    pub context: String,
+    /// One-line summary.
+    pub summary: String,
+    /// Story size.
+    pub size: Option<String>,
+    /// Free-text status.
+    pub status: Option<String>,
+    /// Recurrence note.
+    pub recurs: Option<String>,
+    /// Sunset date.
+    pub expires: Option<String>,
+    /// Creation date.
+    pub created: Option<String>,
+    /// Last-updated date.
+    pub updated: Option<String>,
+    /// Markdown body.
+    pub body: String,
+    /// Scribe-ownership field.
+    pub author: Option<String>,
+    /// Provenance source.
+    pub source: Option<String>,
+    /// Provenance source id.
+    pub source_id: Option<String>,
+    /// Refs and blocked-on entries.
+    #[serde(default)]
+    pub refs: Vec<CardRef>,
+}
+
+/// Counts returned by a board-directory import.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    /// Cards inserted (new `card_id`).
+    pub added: usize,
+    /// Cards updated (existing `card_id`).
+    pub updated: usize,
+    /// Files skipped (parse errors, duplicate `card_id` within the walk).
+    pub skipped: usize,
+}
+
 /// Everything in the store, for plain-text export.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StoreDump {
@@ -114,6 +318,10 @@ pub struct StoreDump {
     pub countdowns: Vec<StoredCountdown>,
     /// All watches.
     pub watches: Vec<Watch>,
+    /// All board cards (open and closed). `#[serde(default)]` keeps v1 dumps
+    /// (which predate cards) importable.
+    #[serde(default)]
+    pub cards: Vec<Card>,
 }
 
 /// The store handle. Cheap to share behind an `Arc`; all access serialized
@@ -174,58 +382,14 @@ impl Store {
     fn migrate(&self) -> Result<(), StoreError> {
         let conn = self.conn.lock().expect("store lock poisoned");
         let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version >= SCHEMA_VERSION {
-            return Ok(());
+        // Version-guarded, idempotent steps: a fresh DB (v0) runs both; a v1 DB
+        // runs only v2. `CREATE TABLE IF NOT EXISTS` keeps re-runs harmless.
+        if version < 1 {
+            conn.execute_batch(MIGRATION_V1)?;
         }
-        conn.execute_batch(
-            "BEGIN;
-             CREATE TABLE IF NOT EXISTS meta (
-               key TEXT PRIMARY KEY, value TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS reminders (
-               id INTEGER PRIMARY KEY,
-               text TEXT NOT NULL,
-               due TEXT,
-               recurrence TEXT,
-               created_gen INTEGER NOT NULL,
-               done_gen INTEGER
-             );
-             CREATE TABLE IF NOT EXISTS countdowns (
-               id INTEGER PRIMARY KEY,
-               label TEXT NOT NULL,
-               start_date TEXT NOT NULL,
-               end_date TEXT NOT NULL,
-               total_work_days INTEGER NOT NULL DEFAULT 30,
-               display TEXT NOT NULL,
-               created_gen INTEGER NOT NULL,
-               retired_gen INTEGER
-             );
-             CREATE TABLE IF NOT EXISTS watches (
-               id INTEGER PRIMARY KEY,
-               url TEXT NOT NULL,
-               note TEXT NOT NULL DEFAULT '',
-               last_hash TEXT,
-               last_seen_gen INTEGER,
-               created_gen INTEGER NOT NULL
-             );
-             -- Registered for later phases (issue #7 C/D); schema reserved
-             -- now so v1 DBs never need a migration for them.
-             CREATE TABLE IF NOT EXISTS ical_feeds (
-               id INTEGER PRIMARY KEY,
-               source TEXT NOT NULL,
-               note TEXT NOT NULL DEFAULT '',
-               created_gen INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS mcp_servers (
-               name TEXT PRIMARY KEY,
-               command TEXT NOT NULL,
-               args_json TEXT NOT NULL DEFAULT '[]',
-               note TEXT NOT NULL DEFAULT '',
-               created_gen INTEGER NOT NULL
-             );
-             PRAGMA user_version = 1;
-             COMMIT;",
-        )?;
+        if version < 2 {
+            conn.execute_batch(MIGRATION_V2)?;
+        }
         Ok(())
     }
 
@@ -419,6 +583,284 @@ impl Store {
         Ok(())
     }
 
+    // ── cards (knowledge board) ────────────────────────────────────────
+
+    /// Insert or update a card (upsert on `card_id`); returns its rowid.
+    /// `closed_gen` is set iff the lane is `done`/`dropped`. Refs and
+    /// blocked-on entries are rewritten transactionally.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn card_add(&self, input: &CardInput, generation: u64) -> Result<i64, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let closed = lane_is_closed(&input.lane).then_some(generation);
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT rowid_id FROM cards WHERE card_id = ?1",
+                params![input.card_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let rowid = if let Some(rowid) = existing {
+            tx.execute(
+                "UPDATE cards SET project=?2, lane=?3, context=?4, summary=?5, size=?6,
+                   status=?7, recurs=?8, expires=?9, created=?10, updated=?11, body=?12,
+                   author=?13, source=?14, source_id=?15, updated_gen=?16, closed_gen=?17
+                 WHERE rowid_id=?1",
+                params![
+                    rowid,
+                    input.project,
+                    input.lane,
+                    input.context,
+                    input.summary,
+                    input.size,
+                    input.status,
+                    input.recurs,
+                    input.expires,
+                    input.created,
+                    input.updated,
+                    input.body,
+                    input.author,
+                    input.source,
+                    input.source_id,
+                    generation,
+                    closed,
+                ],
+            )?;
+            rowid
+        } else {
+            tx.execute(
+                "INSERT INTO cards (card_id, project, lane, context, summary, size, status,
+                   recurs, expires, created, updated, body, author, source, source_id,
+                   created_gen, updated_gen, closed_gen)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                params![
+                    input.card_id,
+                    input.project,
+                    input.lane,
+                    input.context,
+                    input.summary,
+                    input.size,
+                    input.status,
+                    input.recurs,
+                    input.expires,
+                    input.created,
+                    input.updated,
+                    input.body,
+                    input.author,
+                    input.source,
+                    input.source_id,
+                    generation,
+                    generation,
+                    closed,
+                ],
+            )?;
+            tx.last_insert_rowid()
+        };
+        write_refs(&tx, rowid, &input.refs)?;
+        tx.commit()?;
+        Ok(rowid)
+    }
+
+    /// Fetch one card (with its refs) by rowid.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn card_get(&self, id: i64) -> Result<Option<Card>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let card = conn
+            .query_row(
+                &format!("SELECT {CARD_COLS} FROM cards WHERE rowid_id = ?1"),
+                params![id],
+                row_to_card,
+            )
+            .optional()?;
+        match card {
+            Some(mut c) => {
+                c.refs = load_refs(&conn, c.id)?;
+                Ok(Some(c))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Fetch one card (with its refs) by stable `card_id` (the markdown-sync key).
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn card_by_card_id(&self, card_id: &str) -> Result<Option<Card>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let card = conn
+            .query_row(
+                &format!("SELECT {CARD_COLS} FROM cards WHERE card_id = ?1"),
+                params![card_id],
+                row_to_card,
+            )
+            .optional()?;
+        match card {
+            Some(mut c) => {
+                c.refs = load_refs(&conn, c.id)?;
+                Ok(Some(c))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Update a card's mutable fields and refs, stamping `updated_gen`.
+    /// Returns false when no card with `id` exists.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn card_update(
+        &self,
+        id: i64,
+        input: &CardInput,
+        generation: u64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let closed = lane_is_closed(&input.lane).then_some(generation);
+        let changed = tx.execute(
+            "UPDATE cards SET project=?2, lane=?3, context=?4, summary=?5, size=?6,
+               status=?7, recurs=?8, expires=?9, created=?10, updated=?11, body=?12,
+               author=?13, source=?14, source_id=?15, updated_gen=?16, closed_gen=?17
+             WHERE rowid_id=?1",
+            params![
+                id,
+                input.project,
+                input.lane,
+                input.context,
+                input.summary,
+                input.size,
+                input.status,
+                input.recurs,
+                input.expires,
+                input.created,
+                input.updated,
+                input.body,
+                input.author,
+                input.source,
+                input.source_id,
+                generation,
+                closed,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        write_refs(&tx, id, &input.refs)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Move a card to a new lane (and optionally context), stamping
+    /// `updated_gen`. Moving into `done`/`dropped` sets `closed_gen`; moving
+    /// out clears it. Returns false when no such card.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn card_move(
+        &self,
+        id: i64,
+        lane: &str,
+        context: Option<&str>,
+        generation: u64,
+    ) -> Result<bool, StoreError> {
+        let closed = lane_is_closed(lane).then_some(generation);
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let changed = match context {
+            Some(ctx) => conn.execute(
+                "UPDATE cards SET lane=?2, context=?3, updated_gen=?4, closed_gen=?5
+                 WHERE rowid_id=?1",
+                params![id, lane, ctx, generation, closed],
+            )?,
+            None => conn.execute(
+                "UPDATE cards SET lane=?2, updated_gen=?3, closed_gen=?4 WHERE rowid_id=?1",
+                params![id, lane, generation, closed],
+            )?,
+        };
+        Ok(changed > 0)
+    }
+
+    /// Close a card by moving it to a closed lane (`done` by default,
+    /// `dropped` allowed), setting `closed_gen`. Returns false when no such card.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn card_close(&self, id: i64, lane: &str, generation: u64) -> Result<bool, StoreError> {
+        self.card_move(id, lane, None, generation)
+    }
+
+    /// Cards in a lane (optionally scoped to a context), oldest first, with refs.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn cards_in_lane(
+        &self,
+        lane: &str,
+        context: Option<&str>,
+    ) -> Result<Vec<Card>, StoreError> {
+        self.cards_query_inner(None, None, Some(lane), context)
+    }
+
+    /// Query cards by any combination of project/status/lane (all `None` =
+    /// every card), oldest first, with refs.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn cards_query(
+        &self,
+        project: Option<&str>,
+        status: Option<&str>,
+        lane: Option<&str>,
+    ) -> Result<Vec<Card>, StoreError> {
+        self.cards_query_inner(project, status, lane, None)
+    }
+
+    fn cards_query_inner(
+        &self,
+        project: Option<&str>,
+        status: Option<&str>,
+        lane: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<Vec<Card>, StoreError> {
+        let mut sql = format!("SELECT {CARD_COLS} FROM cards");
+        let mut conds: Vec<&str> = Vec::new();
+        let mut args: Vec<String> = Vec::new();
+        if let Some(p) = project {
+            conds.push("project = ?");
+            args.push(p.to_string());
+        }
+        if let Some(s) = status {
+            conds.push("status = ?");
+            args.push(s.to_string());
+        }
+        if let Some(l) = lane {
+            conds.push("lane = ?");
+            args.push(l.to_string());
+        }
+        if let Some(c) = context {
+            conds.push("context = ?");
+            args.push(c.to_string());
+        }
+        if !conds.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conds.join(" AND "));
+        }
+        sql.push_str(" ORDER BY rowid_id");
+
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(&sql)?;
+        let mut cards = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), row_to_card)?
+            .collect::<Result<Vec<_>, _>>()?;
+        for card in &mut cards {
+            card.refs = load_refs(&conn, card.id)?;
+        }
+        Ok(cards)
+    }
+
     // ── export / import (sovereignty) ──────────────────────────────────
 
     /// Dump the whole store as a plain-JSON document.
@@ -460,6 +902,7 @@ impl Store {
                     .collect::<Result<Vec<_>, _>>()?;
                 rows
             },
+            cards: self.cards_query(None, None, None)?,
         };
         Ok(serde_json::to_string_pretty(&dump).unwrap_or_else(|_| "{}".to_string()))
     }
@@ -501,8 +944,83 @@ impl Store {
                 self.watch_seen(id, hash, gen)?;
             }
         }
+        for c in &dump.cards {
+            self.card_add(&card_input_from(c), c.created_gen)?;
+        }
         Ok(())
     }
+}
+
+/// Column list for `cards` SELECTs, matching [`row_to_card`]'s field order.
+const CARD_COLS: &str = "rowid_id, card_id, project, lane, context, summary, size, status, \
+     recurs, expires, created, updated, body, author, source, source_id, \
+     created_gen, updated_gen, closed_gen";
+
+/// Lanes that mark a card closed (carry a `closed_gen`).
+fn lane_is_closed(lane: &str) -> bool {
+    matches!(lane, "done" | "dropped")
+}
+
+/// Rebuild a [`CardInput`] from a [`Card`] (for import / re-insert).
+fn card_input_from(c: &Card) -> CardInput {
+    CardInput {
+        card_id: c.card_id.clone(),
+        project: c.project.clone(),
+        lane: c.lane.clone(),
+        context: c.context.clone(),
+        summary: c.summary.clone(),
+        size: c.size.clone(),
+        status: c.status.clone(),
+        recurs: c.recurs.clone(),
+        expires: c.expires.clone(),
+        created: c.created.clone(),
+        updated: c.updated.clone(),
+        body: c.body.clone(),
+        author: c.author.clone(),
+        source: c.source.clone(),
+        source_id: c.source_id.clone(),
+        refs: c.refs.clone(),
+    }
+}
+
+/// Rewrite a card's `card_refs` rows (delete-then-insert) within a transaction.
+fn write_refs(
+    tx: &rusqlite::Transaction<'_>,
+    card_rowid: i64,
+    refs: &[CardRef],
+) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM card_refs WHERE card_rowid = ?1",
+        params![card_rowid],
+    )?;
+    for r in refs {
+        tx.execute(
+            "INSERT INTO card_refs (card_rowid, kind, label, value, ordinal)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![card_rowid, r.kind, r.label, r.value, r.ordinal],
+        )?;
+    }
+    Ok(())
+}
+
+/// Load a card's refs (both `ref` and `blocked_on` kinds), in stable order:
+/// `blocked_on` first by `ordinal`, then `ref` entries by label.
+fn load_refs(conn: &Connection, card_rowid: i64) -> Result<Vec<CardRef>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, label, value, ordinal FROM card_refs
+         WHERE card_rowid = ?1 ORDER BY kind, ordinal, label",
+    )?;
+    let rows = stmt
+        .query_map(params![card_rowid], |row| {
+            Ok(CardRef {
+                kind: row.get(0)?,
+                label: row.get(1)?,
+                value: row.get(2)?,
+                ordinal: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 fn row_to_reminder(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reminder> {
@@ -537,6 +1055,33 @@ fn row_to_watch(row: &rusqlite::Row<'_>) -> rusqlite::Result<Watch> {
         last_hash: row.get(3)?,
         last_seen_gen: row.get(4)?,
         created_gen: row.get(5)?,
+    })
+}
+
+/// Map a `cards` row to a [`Card`]. Column order must match [`CARD_COLS`].
+/// `refs` is left empty — callers fill it via [`load_refs`].
+fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
+    Ok(Card {
+        id: row.get(0)?,
+        card_id: row.get(1)?,
+        project: row.get(2)?,
+        lane: row.get(3)?,
+        context: row.get(4)?,
+        summary: row.get(5)?,
+        size: row.get(6)?,
+        status: row.get(7)?,
+        recurs: row.get(8)?,
+        expires: row.get(9)?,
+        created: row.get(10)?,
+        updated: row.get(11)?,
+        body: row.get(12)?,
+        author: row.get(13)?,
+        source: row.get(14)?,
+        source_id: row.get(15)?,
+        created_gen: row.get(16)?,
+        updated_gen: row.get(17)?,
+        closed_gen: row.get(18)?,
+        refs: Vec::new(),
     })
 }
 
@@ -657,5 +1202,269 @@ mod tests {
         assert_eq!(from_config, PathBuf::from("/x/store.db"));
         let from_home = Store::resolve_path(None, Some(Path::new("/home/u")));
         assert_eq!(from_home, PathBuf::from("/home/u/.modulex/store.db"));
+    }
+
+    // ── cards (knowledge board, schema v2) ─────────────────────────────
+
+    #[test]
+    fn card_lifecycle_add_move_update_close() {
+        let store = Store::in_memory().unwrap();
+        let input = CardInput {
+            card_id: "homelab-2026-06-09-vpn".into(),
+            project: "homelab".into(),
+            lane: "p2".into(),
+            summary: "renew vpn cert".into(),
+            size: Some("1d".into()),
+            ..Default::default()
+        };
+        let id = store.card_add(&input, 1).unwrap();
+
+        let c = store.card_get(id).unwrap().unwrap();
+        assert_eq!(c.lane, "p2");
+        assert_eq!(c.created_gen, 1);
+        assert!(c.closed_gen.is_none(), "p2 is an open lane");
+
+        // promote to active
+        assert!(store.card_move(id, "p0", None, 2).unwrap());
+        assert_eq!(store.cards_in_lane("p0", None).unwrap().len(), 1);
+        assert!(store.card_get(id).unwrap().unwrap().closed_gen.is_none());
+
+        // close
+        assert!(store.card_close(id, "done", 3).unwrap());
+        let c = store.card_get(id).unwrap().unwrap();
+        assert_eq!(c.lane, "done");
+        assert_eq!(c.closed_gen, Some(3));
+        assert_eq!(c.updated_gen, 3);
+
+        // a full update can reopen it
+        let mut upd = card_input_from(&c);
+        upd.lane = "p1".into();
+        upd.status = Some("reopened".into());
+        assert!(store.card_update(id, &upd, 4).unwrap());
+        let c = store.card_get(id).unwrap().unwrap();
+        assert_eq!(c.lane, "p1");
+        assert!(
+            c.closed_gen.is_none(),
+            "moving out of done clears closed_gen"
+        );
+        assert_eq!(c.status.as_deref(), Some("reopened"));
+
+        assert!(!store.card_close(9999, "done", 5).unwrap(), "missing id");
+    }
+
+    #[test]
+    fn card_refs_round_trip_preserves_order() {
+        let store = Store::in_memory().unwrap();
+        let refs = vec![
+            CardRef {
+                kind: "blocked_on".into(),
+                label: String::new(),
+                value: "https://x/issues/1".into(),
+                ordinal: 0,
+            },
+            CardRef {
+                kind: "blocked_on".into(),
+                label: String::new(),
+                value: "https://x/issues/2".into(),
+                ordinal: 1,
+            },
+            CardRef {
+                kind: "ref".into(),
+                label: "issue".into(),
+                value: "https://x/issues/9".into(),
+                ordinal: 0,
+            },
+            CardRef {
+                kind: "ref".into(),
+                label: "pr".into(),
+                value: "https://x/pull/3".into(),
+                ordinal: 0,
+            },
+        ];
+        let input = CardInput {
+            card_id: "p-1".into(),
+            lane: "p1".into(),
+            summary: "s".into(),
+            refs: refs.clone(),
+            ..Default::default()
+        };
+        let id = store.card_add(&input, 1).unwrap();
+        assert_eq!(store.card_get(id).unwrap().unwrap().refs, refs);
+
+        // updating refs replaces them wholesale
+        let mut upd = card_input_from(&store.card_get(id).unwrap().unwrap());
+        upd.refs = vec![CardRef {
+            kind: "ref".into(),
+            label: "doc".into(),
+            value: "docs/d.md".into(),
+            ordinal: 0,
+        }];
+        store.card_update(id, &upd, 2).unwrap();
+        assert_eq!(store.card_get(id).unwrap().unwrap().refs.len(), 1);
+    }
+
+    #[test]
+    fn card_add_upserts_by_card_id() {
+        let store = Store::in_memory().unwrap();
+        let mut input = CardInput {
+            card_id: "dup-1".into(),
+            lane: "p2".into(),
+            summary: "first".into(),
+            ..Default::default()
+        };
+        let id1 = store.card_add(&input, 1).unwrap();
+        input.summary = "second".into();
+        input.lane = "p0".into();
+        let id2 = store.card_add(&input, 2).unwrap();
+
+        assert_eq!(id1, id2, "same card_id upserts to one row");
+        let c = store.card_get(id1).unwrap().unwrap();
+        assert_eq!(c.summary, "second");
+        assert_eq!(c.lane, "p0");
+        assert_eq!(c.created_gen, 1, "created_gen preserved on upsert");
+        assert_eq!(c.updated_gen, 2);
+        assert_eq!(store.cards_query(None, None, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cards_query_filters_by_project_status_lane() {
+        let store = Store::in_memory().unwrap();
+        store
+            .card_add(
+                &CardInput {
+                    card_id: "a".into(),
+                    project: "homelab".into(),
+                    lane: "p0".into(),
+                    status: Some("blocked".into()),
+                    summary: "x".into(),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        store
+            .card_add(
+                &CardInput {
+                    card_id: "b".into(),
+                    project: "gilabot".into(),
+                    lane: "p0".into(),
+                    summary: "y".into(),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .cards_query(Some("homelab"), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .cards_query(None, Some("blocked"), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.cards_query(None, None, Some("p0")).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .cards_query(Some("gilabot"), Some("blocked"), None)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn migration_v1_to_v2_upgrades_cleanly() {
+        // A DB stamped at v1 (no cards table) must upgrade without losing data.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.execute(
+            "INSERT INTO reminders (text, created_gen) VALUES ('legacy', 1)",
+            [],
+        )
+        .unwrap();
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 1);
+
+        let store = Store {
+            conn: Mutex::new(conn),
+        };
+        store.migrate().unwrap();
+
+        let v: i32 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
+        assert_eq!(store.reminders_open().unwrap().len(), 1, "v1 data intact");
+
+        // the cards table is now usable
+        store
+            .card_add(
+                &CardInput {
+                    card_id: "x-1".into(),
+                    lane: "p1".into(),
+                    summary: "hi".into(),
+                    ..Default::default()
+                },
+                2,
+            )
+            .unwrap();
+        assert_eq!(store.cards_in_lane("p1", None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cards_export_import_round_trips() {
+        let a = Store::in_memory().unwrap();
+        a.card_add(
+            &CardInput {
+                card_id: "c-1".into(),
+                project: "homelab".into(),
+                lane: "p1".into(),
+                summary: "alpha".into(),
+                refs: vec![CardRef {
+                    kind: "ref".into(),
+                    label: "issue".into(),
+                    value: "https://x/1".into(),
+                    ordinal: 0,
+                }],
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+        a.card_add(
+            &CardInput {
+                card_id: "c-2".into(),
+                lane: "done".into(),
+                summary: "beta".into(),
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+
+        let json = a.export_json().unwrap();
+        assert!(json.contains("alpha"), "plain-text export carries cards");
+
+        let b = Store::in_memory().unwrap();
+        b.import_json(&json).unwrap();
+        assert_eq!(b.cards_query(None, None, None).unwrap().len(), 2);
+        assert_eq!(
+            b.cards_in_lane("done", None).unwrap()[0].closed_gen,
+            Some(1),
+            "closed lane re-derives closed_gen on import"
+        );
+        assert_eq!(b.card_by_card_id("c-1").unwrap().unwrap().refs.len(), 1);
     }
 }
