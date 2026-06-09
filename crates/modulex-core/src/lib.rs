@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod board_md;
 pub mod caveats;
 pub mod config;
 pub mod credentials;
@@ -34,6 +35,7 @@ pub mod step;
 pub mod steps;
 pub mod store;
 
+pub use board_md::{card_from_markdown, card_to_markdown, BoardMdError};
 pub use caveats::{CaveatsSource, GrantedCaveats};
 pub use config::{Config, RoutineSpec, StepSpec};
 pub use credentials::{CredentialRef, Secret};

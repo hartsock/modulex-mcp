@@ -31,6 +31,10 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Maintained drop-in for the deprecated/unmaintained serde_yaml — parses the
+# knowledge-board card frontmatter (refs map + blocked_on list) for the
+# markdown round-trip (board_md).
+serde_yaml_ng = "0.10"
 shell-words = "1.1"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "io-std"] }
