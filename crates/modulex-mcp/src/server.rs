@@ -372,6 +372,66 @@ type = "reminders"
     }
 
     #[tokio::test]
+    async fn board_tools_round_trip_via_invoke() {
+        // The board facet is opt-in (unlisted by default) but callable through
+        // tool_invoke — exercise put -> query -> move -> close end to end.
+        let s = server(vec![]);
+
+        let put = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 100, "method": "tools/call",
+                "params": { "name": "tool_invoke", "arguments": {
+                    "name": "board_put",
+                    "arguments": {
+                        "card_id": "homelab-2026-06-09-vpn",
+                        "project": "homelab", "lane": "p1",
+                        "summary": "renew the vpn cert",
+                        "refs": { "issue": "https://example.com/1" },
+                        "blocked_on": ["https://example.com/2"]
+                    }
+                } }
+            }))
+            .await
+            .unwrap();
+        assert!(put["result"].get("isError").is_none(), "{put}");
+        let body: Value =
+            serde_json::from_str(put["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let id = body["id"].as_i64().unwrap();
+
+        // query by lane finds it with its refs.
+        let query = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 101, "method": "tools/call",
+                "params": { "name": "tool_invoke", "arguments": {
+                    "name": "board_query", "arguments": { "lane": "p1" }
+                } }
+            }))
+            .await
+            .unwrap();
+        let cards: Value =
+            serde_json::from_str(query["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(cards.as_array().unwrap().len(), 1);
+        assert_eq!(cards[0]["card_id"], "homelab-2026-06-09-vpn");
+        assert_eq!(cards[0]["refs"].as_array().unwrap().len(), 2);
+
+        // move, then close.
+        for (tool, args) in [
+            ("board_move", json!({ "id": id, "lane": "p0" })),
+            ("board_close", json!({ "id": id })),
+        ] {
+            let resp = s
+                .handle(&json!({
+                    "jsonrpc": "2.0", "id": 102, "method": "tools/call",
+                    "params": { "name": "tool_invoke",
+                                "arguments": { "name": tool, "arguments": args } }
+                }))
+                .await
+                .unwrap();
+            assert!(resp["result"].get("isError").is_none(), "{tool}: {resp}");
+        }
+    }
+
+    #[tokio::test]
     async fn routine_eval_runs_inline_steps_under_the_same_leash() {
         let s = server(vec![ok_out("inline says hi\n")]);
         // A two-step inline routine: a granted script + a pure date step.

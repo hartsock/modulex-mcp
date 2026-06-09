@@ -501,6 +501,126 @@ fn h_store_close<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
+// ── board dispatch (knowledge-board cards; opt-in `board` facet) ───────
+
+fn h_board_put<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let store = match store_of(cx.engine) {
+            Ok(store) => store,
+            Err(fault) => return fault,
+        };
+        let Some(card_id) = args.get("card_id").and_then(Value::as_str) else {
+            return ToolOutcome::err("board_put requires `card_id`");
+        };
+        let str_of = |k: &str| args.get(k).and_then(Value::as_str).map(ToString::to_string);
+
+        let mut refs = Vec::new();
+        if let Some(items) = args.get("blocked_on").and_then(Value::as_array) {
+            for (i, v) in items.iter().enumerate() {
+                if let Some(value) = v.as_str() {
+                    refs.push(modulex_core::store::CardRef {
+                        kind: "blocked_on".into(),
+                        label: String::new(),
+                        value: value.to_string(),
+                        ordinal: i as i64,
+                    });
+                }
+            }
+        }
+        if let Some(map) = args.get("refs").and_then(Value::as_object) {
+            for (label, v) in map {
+                if let Some(value) = v.as_str() {
+                    refs.push(modulex_core::store::CardRef {
+                        kind: "ref".into(),
+                        label: label.clone(),
+                        value: value.to_string(),
+                        ordinal: 0,
+                    });
+                }
+            }
+        }
+
+        let input = modulex_core::store::CardInput {
+            card_id: card_id.to_string(),
+            project: str_of("project").unwrap_or_default(),
+            lane: str_of("lane").unwrap_or_else(|| "p2".to_string()),
+            context: str_of("context").unwrap_or_default(),
+            summary: str_of("summary").unwrap_or_default(),
+            size: str_of("size"),
+            status: str_of("status"),
+            recurs: str_of("recurs"),
+            expires: str_of("expires"),
+            created: str_of("created"),
+            updated: str_of("updated"),
+            body: str_of("body").unwrap_or_default(),
+            author: str_of("author"),
+            source: str_of("source"),
+            source_id: str_of("source_id"),
+            refs,
+        };
+        // Mutation stamp: the generation current at call time — a counter.
+        let generation = cx.engine.current_generation();
+        store_outcome(
+            store
+                .card_add(&input, generation)
+                .map(|id| json!({ "id": id, "card_id": card_id, "updated_gen": generation })),
+        )
+    })
+}
+
+fn h_board_query<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let store = match store_of(cx.engine) {
+            Ok(store) => store,
+            Err(fault) => return fault,
+        };
+        store_outcome(store.cards_query(
+            args.get("project").and_then(Value::as_str),
+            args.get("status").and_then(Value::as_str),
+            args.get("lane").and_then(Value::as_str),
+        ))
+    })
+}
+
+fn h_board_move<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let store = match store_of(cx.engine) {
+            Ok(store) => store,
+            Err(fault) => return fault,
+        };
+        let Some(id) = args.get("id").and_then(Value::as_i64) else {
+            return ToolOutcome::err("board_move requires integer `id`");
+        };
+        let Some(lane) = args.get("lane").and_then(Value::as_str) else {
+            return ToolOutcome::err("board_move requires `lane`");
+        };
+        let context = args.get("context").and_then(Value::as_str);
+        match store.card_move(id, lane, context, cx.engine.current_generation()) {
+            Ok(true) => ToolOutcome::ok(format!("card #{id} moved to {lane}")),
+            Ok(false) => ToolOutcome::err(format!("no card #{id}")),
+            Err(e) => ToolOutcome::err(e.to_string()),
+        }
+    })
+}
+
+fn h_board_close<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let store = match store_of(cx.engine) {
+            Ok(store) => store,
+            Err(fault) => return fault,
+        };
+        let Some(id) = args.get("id").and_then(Value::as_i64) else {
+            return ToolOutcome::err("board_close requires integer `id`");
+        };
+        let lane = args.get("lane").and_then(Value::as_str).unwrap_or("done");
+        match store.card_close(id, lane, cx.engine.current_generation()) {
+            Ok(true) => ToolOutcome::ok(format!("card #{id} closed to {lane}")),
+            Ok(false) => ToolOutcome::err(format!("no card #{id}")),
+            Err(e) => ToolOutcome::err(e.to_string()),
+        }
+    })
+}
+
 // ── discovery trio (the constant-size long tail) ───────────────────────
 
 fn h_tool_search<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
@@ -984,6 +1104,101 @@ fn build_registry() -> ToolRegistry {
             },
             handler: h_store_export,
         },
+        // ── board facet: opt-in, NOT in the default index (budget stays 12).
+        // Reachable by default via tool_search/tool_invoke, the `board` step,
+        // and routine_eval — at zero tools/list cost.
+        ToolEntry {
+            spec: ToolSpec {
+                name: "board_put",
+                description: "Create or update a knowledge-board card (upsert by \
+                    card_id). Fields: card_id (req), project, lane (default p2), \
+                    context, summary, body, size, status, recurs, expires, created, \
+                    updated, refs {label: url}, blocked_on [url]. Returns {id, \
+                    card_id, updated_gen}.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "card_id": { "type": "string" },
+                        "project": { "type": "string" },
+                        "lane": { "type": "string",
+                                  "enum": ["p0", "p1", "p2", "done", "dropped"] },
+                        "context": { "type": "string" },
+                        "summary": { "type": "string" },
+                        "body": { "type": "string" },
+                        "size": { "type": "string" },
+                        "status": { "type": "string" },
+                        "recurs": { "type": "string" },
+                        "expires": { "type": "string" },
+                        "created": { "type": "string" },
+                        "updated": { "type": "string" },
+                        "refs": { "type": "object",
+                                  "additionalProperties": { "type": "string" } },
+                        "blocked_on": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["card_id"]
+                }),
+                mutates: true,
+                facet: "board",
+            },
+            handler: h_board_put,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "board_query",
+                description: "Query knowledge-board cards by any combination of \
+                    lane / project / status (omit all for every card). Returns the \
+                    cards with their refs and blocked_on entries.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "lane": { "type": "string" },
+                        "project": { "type": "string" },
+                        "status": { "type": "string" }
+                    }
+                }),
+                mutates: false,
+                facet: "board",
+            },
+            handler: h_board_query,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "board_move",
+                description: "Move a card to a lane (and optionally context). \
+                    Moving into done/dropped stamps closed_gen; moving out clears it.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "lane": { "type": "string",
+                                  "enum": ["p0", "p1", "p2", "done", "dropped"] },
+                        "context": { "type": "string" }
+                    },
+                    "required": ["id", "lane"]
+                }),
+                mutates: true,
+                facet: "board",
+            },
+            handler: h_board_move,
+        },
+        ToolEntry {
+            spec: ToolSpec {
+                name: "board_close",
+                description: "Close a card by id — move it to done (default) or \
+                    dropped, stamping closed_gen.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "lane": { "type": "string", "enum": ["done", "dropped"] }
+                    },
+                    "required": ["id"]
+                }),
+                mutates: true,
+                facet: "board",
+            },
+            handler: h_board_close,
+        },
     ];
     ToolRegistry { entries }
 }
@@ -1019,6 +1234,10 @@ mod tests {
             ("tool_invoke", true, "core"),
             ("routine_eval", true, "core"),
             ("store_export", false, "store-classic"),
+            ("board_put", true, "board"),
+            ("board_query", false, "board"),
+            ("board_move", true, "board"),
+            ("board_close", true, "board"),
         ];
         let actual: Vec<(&str, bool, &str)> = registry()
             .specs()
@@ -1064,6 +1283,42 @@ mod tests {
                 "routine_eval",
             ],
             "the default index changed — a deliberate, reviewed event"
+        );
+    }
+
+    /// The board facet is OPT-IN: absent from the default index (the budget
+    /// stays 12), but listed when exposed and always discoverable.
+    #[test]
+    fn board_facet_is_opt_in_but_discoverable() {
+        use modulex_core::config::McpConfig;
+
+        // Default: board tools are NOT listed.
+        let default = crate::facets::FacetPolicy::resolve(None, &McpConfig::default());
+        let listed_by_default: Vec<&str> = registry()
+            .specs()
+            .filter(|s| default.exposes(s.facet))
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !listed_by_default.iter().any(|n| n.starts_with("board_")),
+            "board tools must not appear in the default index"
+        );
+
+        // Opt in via expose: the four board tools list.
+        let opted =
+            crate::facets::FacetPolicy::resolve(Some("core,store,board"), &McpConfig::default());
+        let board_listed = registry()
+            .specs()
+            .filter(|s| opted.exposes(s.facet) && s.facet == "board")
+            .count();
+        assert_eq!(board_listed, 4, "opting into `board` lists all four tools");
+
+        // Discoverable even when not listed (callability is broader than listing).
+        assert!(
+            registry()
+                .specs()
+                .any(|s| s.name == "board_put" && !default.denies(s.facet)),
+            "board_put is reachable via tool_search/tool_invoke by default"
         );
     }
 
