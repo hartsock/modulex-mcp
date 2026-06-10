@@ -19,6 +19,7 @@
 //! | `board-scan` | [`board`] | — (filesystem lane dirs) |
 //! | `chores-check` | [`board`] | — |
 //! | `board` | [`board`] | — (store-backed cards) |
+//! | `board-ingest` | [`board_ingest`] | gh (issues → store cards) |
 //! | `python` | [`python`] | the configured interpreter (plugin protocol) |
 //! | `reminders` | [`reminders`] | — (agent state store) |
 //! | `url-watch` | [`web`] | — (leashed in-proc fetch; feature `web`) |
@@ -28,6 +29,7 @@ use std::sync::Arc;
 use crate::registry::StepRegistry;
 
 pub mod board;
+pub mod board_ingest;
 pub mod dates;
 pub mod git;
 pub mod github;
@@ -60,6 +62,7 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(board::BoardScan));
     registry.register(Arc::new(board::ChoresCheck));
     registry.register(Arc::new(board::Board));
+    registry.register(Arc::new(board_ingest::BoardIngest));
     registry.register(Arc::new(python::PythonPlugin));
     registry.register(Arc::new(reminders::Reminders));
     #[cfg(feature = "web")]
@@ -92,6 +95,7 @@ mod tests {
             "board-scan",
             "chores-check",
             "board",
+            "board-ingest",
             "python",
             "reminders",
         ] {

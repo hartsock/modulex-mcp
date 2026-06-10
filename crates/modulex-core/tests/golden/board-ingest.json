@@ -1,0 +1,45 @@
+{
+  "properties": {
+    "repos": {
+      "items": {
+        "properties": {
+          "card_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "ingested": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "auth-failed",
+              "error"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "state",
+          "ingested"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "repos"
+  ],
+  "type": "object"
+}
