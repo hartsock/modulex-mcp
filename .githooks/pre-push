@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# PIPELINE PARITY: this hook mirrors .github/workflows/ci.yml.
-# When editing this file, verify it still matches the pipeline (and vice
-# versa — pipeline edits REQUIRE a hook audit; see CLAUDE.md).
+# PIPELINE PARITY: this hook mirrors the `check` job of
+# .github/workflows/ci.yml. When editing this file, verify it still matches
+# the pipeline (and vice versa — pipeline edits REQUIRE a hook audit; see
+# CLAUDE.md). The CI `coverage` job (just cov-ci) is intentionally NOT run
+# pre-push: full llvm-cov instrumentation is too slow for every push, so the
+# coverage floor is enforced in CI only. Run `just cov-ci` locally before a PR.
 set -euo pipefail
 
 echo "pre-push: cargo fmt --check"

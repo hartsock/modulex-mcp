@@ -50,9 +50,11 @@ display = "{label}: work day {n} of {total}"
 # (reminder_add, watch_add, ...) live in the "store-classic" facet:
 # unlisted but discoverable via tool_search and callable via tool_invoke.
 # $MODULEX_TOOLS="core,store,store-classic" overrides; `deny` kills a facet
-# entirely (unlisted, undiscoverable, uncallable).
+# entirely (unlisted, undiscoverable, uncallable). The "board" and "mcp"
+# (downstream-MCP registry, mcp_register) facets are also opt-in: unlisted by
+# default, discoverable via tool_search and callable via tool_invoke.
 # [mcp]
-# expose = ["core", "store", "store-classic"]
+# expose = ["core", "store", "store-classic", "mcp"]
 # deny = []
 
 # Optional explicit leash (tier 2; $MODULEX_CAVEATS JSON is tier 1):
@@ -96,6 +98,22 @@ type = "reminders"
 [[routines.morning.steps]]
 name = "watched pages"
 type = "url-watch" # leashed in-proc fetch: net Caveats axis + SSRF screening
+
+# --- Phase: downstream MCP proxy (issue #7) ---
+# Register a downstream MCP server once (mcp_register tool or `store import`):
+#   mcp_register{action:"add", name:"gh", command:"gh-mcp", args:["serve"]}
+# then call its tools through modulex — the agent never sees the credentials.
+# The downstream command must be in the exec grant (declare `command` inline
+# below so it joins the declared-default grant, or list it in [caveats] exec).
+# Credentials are REFERENCES resolved at spawn time, never inlined or stored.
+# [[routines.morning.steps]]
+# name = "open issues"
+# type = "mcp-query"
+# server = "gh"                       # a name registered via mcp_register
+# tool = "list_issues"                # the downstream tool to call
+# command = "gh-mcp"                  # declare for the grant (store can't widen it)
+# arguments = { repo = "owner/name", state = "open" }
+# env = { GITHUB_TOKEN = { cmd = "secret-tool lookup gh-token" } }
 
 # --- Phase: deadlines & countdowns (config + store, merged) ---
 

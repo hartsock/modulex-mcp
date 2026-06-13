@@ -621,6 +621,51 @@ fn h_board_close<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
     })
 }
 
+// ── mcp registry (downstream MCPs behind modulex; opt-in `mcp` facet) ──
+
+fn h_mcp_register<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let store = match store_of(cx.engine) {
+            Ok(store) => store,
+            Err(fault) => return fault,
+        };
+        let action = args.get("action").and_then(Value::as_str).unwrap_or("add");
+        match action {
+            "list" => store_outcome(store.mcp_servers()),
+            "remove" => {
+                let Some(name) = args.get("name").and_then(Value::as_str) else {
+                    return ToolOutcome::err("mcp_register remove requires `name`");
+                };
+                match store.mcp_unregister(name) {
+                    Ok(true) => ToolOutcome::ok(format!("mcp server {name:?} unregistered")),
+                    Ok(false) => ToolOutcome::err(format!("no registered mcp server {name:?}")),
+                    Err(e) => ToolOutcome::err(e.to_string()),
+                }
+            }
+            "add" => {
+                let (Some(name), Some(command)) = (
+                    args.get("name").and_then(Value::as_str),
+                    args.get("command").and_then(Value::as_str),
+                ) else {
+                    return ToolOutcome::err("mcp_register add requires `name` and `command`");
+                };
+                let server_args = str_list(args, "args");
+                let note = args.get("note").and_then(Value::as_str).unwrap_or("");
+                // Mutation stamp: the generation current at call time — a counter.
+                let generation = cx.engine.current_generation();
+                store_outcome(
+                    store
+                        .mcp_register(name, command, &server_args, note, generation)
+                        .map(|()| json!({ "name": name, "created_gen": generation })),
+                )
+            }
+            other => ToolOutcome::err(format!(
+                "mcp_register: unknown action {other:?} (add | list | remove)"
+            )),
+        }
+    })
+}
+
 // ── discovery trio (the constant-size long tail) ───────────────────────
 
 fn h_tool_search<'a>(cx: &'a CallCtx<'a>, args: &'a Value) -> ToolFuture<'a> {
@@ -1199,6 +1244,41 @@ fn build_registry() -> ToolRegistry {
             },
             handler: h_board_close,
         },
+        // ── mcp facet: opt-in, NOT in the default index (budget stays 12).
+        // Reachable by default via tool_search/tool_invoke and the `mcp-query`
+        // step — at zero tools/list cost. This is the credential-proxy
+        // registry: a hotseat agent points at modulex, never at the
+        // downstream's credentials.
+        ToolEntry {
+            spec: ToolSpec {
+                name: "mcp_register",
+                description: "Manage the registry of downstream MCP servers hidden \
+                    behind modulex (issue #7 proxy). action=add {name, command, \
+                    args?, note?} registers a server (stores the INVOCATION SHAPE \
+                    only — never credentials; the mcp-query step injects credential \
+                    references at spawn time and the command is exec-leashed) | \
+                    list returns all servers | remove {name} unregisters. Returns \
+                    {name, created_gen} on add.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string",
+                                    "enum": ["add", "list", "remove"], "default": "add" },
+                        "name": { "type": "string",
+                                  "description": "registry name (add/remove)" },
+                        "command": { "type": "string",
+                                     "description": "program to spawn as a stdio MCP \
+                                                     server; must be in the exec grant" },
+                        "args": { "type": "array", "items": { "type": "string" },
+                                  "description": "static argv for the command" },
+                        "note": { "type": "string" }
+                    }
+                }),
+                mutates: true,
+                facet: "mcp",
+            },
+            handler: h_mcp_register,
+        },
     ];
     ToolRegistry { entries }
 }
@@ -1238,6 +1318,7 @@ mod tests {
             ("board_query", false, "board"),
             ("board_move", true, "board"),
             ("board_close", true, "board"),
+            ("mcp_register", true, "mcp"),
         ];
         let actual: Vec<(&str, bool, &str)> = registry()
             .specs()
@@ -1319,6 +1400,40 @@ mod tests {
                 .specs()
                 .any(|s| s.name == "board_put" && !default.denies(s.facet)),
             "board_put is reachable via tool_search/tool_invoke by default"
+        );
+    }
+
+    /// The mcp (credential-proxy) facet is OPT-IN: absent from the default
+    /// index (the budget stays 12), but listed when exposed and always
+    /// discoverable via tool_search/tool_invoke.
+    #[test]
+    fn mcp_facet_is_opt_in_but_discoverable() {
+        use modulex_core::config::McpConfig;
+
+        let default = crate::facets::FacetPolicy::resolve(None, &McpConfig::default());
+        assert!(
+            !registry()
+                .specs()
+                .filter(|s| default.exposes(s.facet))
+                .any(|s| s.name == "mcp_register"),
+            "mcp_register must not appear in the default index"
+        );
+
+        let opted =
+            crate::facets::FacetPolicy::resolve(Some("core,store,mcp"), &McpConfig::default());
+        assert!(
+            registry()
+                .specs()
+                .any(|s| s.name == "mcp_register" && opted.exposes(s.facet)),
+            "opting into `mcp` lists mcp_register"
+        );
+
+        // Discoverable (callable) by default even though it is not listed.
+        assert!(
+            registry()
+                .specs()
+                .any(|s| s.name == "mcp_register" && !default.denies(s.facet)),
+            "mcp_register is reachable via tool_search/tool_invoke by default"
         );
     }
 

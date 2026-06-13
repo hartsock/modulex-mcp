@@ -432,6 +432,110 @@ type = "reminders"
     }
 
     #[tokio::test]
+    async fn mcp_register_round_trips_via_invoke() {
+        // The mcp (credential-proxy) facet is opt-in (unlisted by default) but
+        // callable through tool_invoke — register -> list -> remove a
+        // downstream server. The registry stores the INVOCATION SHAPE only.
+        let s = server(vec![]);
+
+        let add = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 110, "method": "tools/call",
+                "params": { "name": "tool_invoke", "arguments": {
+                    "name": "mcp_register",
+                    "arguments": {
+                        "action": "add", "name": "gh",
+                        "command": "gh-mcp", "args": ["serve"],
+                        "note": "enterprise github"
+                    }
+                } }
+            }))
+            .await
+            .unwrap();
+        assert!(add["result"].get("isError").is_none(), "{add}");
+        let body: Value =
+            serde_json::from_str(add["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["name"], "gh");
+        assert_eq!(body["created_gen"], 0);
+
+        // list returns the registered server (and no credential material).
+        let list = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 111, "method": "tools/call",
+                "params": { "name": "tool_invoke", "arguments": {
+                    "name": "mcp_register", "arguments": { "action": "list" }
+                } }
+            }))
+            .await
+            .unwrap();
+        let listing = list["result"]["content"][0]["text"].as_str().unwrap();
+        let servers: Value = serde_json::from_str(listing).unwrap();
+        assert_eq!(servers.as_array().unwrap().len(), 1);
+        assert_eq!(servers[0]["command"], "gh-mcp");
+        assert_eq!(servers[0]["args"][0], "serve");
+        assert!(!listing.contains("token"), "no credential material listed");
+
+        // remove unregisters it.
+        let remove = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 112, "method": "tools/call",
+                "params": { "name": "tool_invoke", "arguments": {
+                    "name": "mcp_register",
+                    "arguments": { "action": "remove", "name": "gh" }
+                } }
+            }))
+            .await
+            .unwrap();
+        assert!(remove["result"].get("isError").is_none(), "{remove}");
+
+        // add without required fields is a tool error.
+        let bad = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 113, "method": "tools/call",
+                "params": { "name": "tool_invoke", "arguments": {
+                    "name": "mcp_register", "arguments": { "action": "add", "name": "x" }
+                } }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn mcp_register_is_unlisted_but_discoverable() {
+        // Listing is context cost, not capability: mcp_register is in the
+        // non-default `mcp` facet — absent from tools/list, but tool_search
+        // finds it and tool_describe discloses its schema.
+        let s = server(vec![]);
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 120, "method": "tools/call",
+                "params": { "name": "tool_search", "arguments": { "query": "downstream mcp" } }
+            }))
+            .await
+            .unwrap();
+        let found: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(found["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "mcp_register" && t["facet"] == "mcp"));
+
+        let resp = s
+            .handle(&json!({
+                "jsonrpc": "2.0", "id": 121, "method": "tools/call",
+                "params": { "name": "tool_describe", "arguments": { "name": "mcp_register" } }
+            }))
+            .await
+            .unwrap();
+        let spec: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(spec["facet"], "mcp");
+        assert_eq!(spec["mutates"], true);
+    }
+
+    #[tokio::test]
     async fn routine_eval_runs_inline_steps_under_the_same_leash() {
         let s = server(vec![ok_out("inline says hi\n")]);
         // A two-step inline routine: a granted script + a pure date step.

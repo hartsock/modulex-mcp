@@ -176,6 +176,28 @@ pub struct StoredCountdown {
     pub retired_gen: Option<u64>,
 }
 
+/// A downstream MCP server registered behind modulex (issue #7, PR D).
+///
+/// The registry holds only the *invocation shape* — the program to spawn and
+/// its static argv. Credentials are **never** stored here: the spawning step
+/// resolves credential references at run time (the [`crate::credentials::Secret`]
+/// model), so a server's secrets never touch this table, an export, or a
+/// report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    /// Stable registry name (the primary key; how a step selects this server).
+    pub name: String,
+    /// The program to spawn as a stdio MCP server (e.g. `npx`, `uvx`, a path).
+    /// This is what the exec leash checks before the process exists.
+    pub command: String,
+    /// Static arguments passed to `command`, in order.
+    pub args: Vec<String>,
+    /// Free-text note (what this server is for).
+    pub note: String,
+    /// Engine generation when registered (a counter, never wall-clock).
+    pub created_gen: u64,
+}
+
 /// A URL registered for periodic change tracking.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Watch {
@@ -318,6 +340,11 @@ pub struct StoreDump {
     pub countdowns: Vec<StoredCountdown>,
     /// All watches.
     pub watches: Vec<Watch>,
+    /// All registered downstream MCP servers (invocation shapes only — no
+    /// credentials). `#[serde(default)]` keeps dumps that predate the proxy
+    /// substrate importable.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServer>,
     /// All board cards (open and closed). `#[serde(default)]` keeps v1 dumps
     /// (which predate cards) importable.
     #[serde(default)]
@@ -581,6 +608,76 @@ impl Store {
             params![id, hash, generation],
         )?;
         Ok(())
+    }
+
+    // ── mcp servers (downstream MCPs behind modulex; issue #7 PR D) ─────
+
+    /// Register (or replace, by `name`) a downstream MCP server. Stores ONLY
+    /// the invocation shape — command + static argv. Credential references are
+    /// resolved by the calling step at spawn time and never persisted here.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn mcp_register(
+        &self,
+        name: &str,
+        command: &str,
+        args: &[String],
+        note: &str,
+        generation: u64,
+    ) -> Result<(), StoreError> {
+        let args_json = serde_json::to_string(args).unwrap_or_else(|_| "[]".to_string());
+        let conn = self.conn.lock().expect("store lock poisoned");
+        conn.execute(
+            "INSERT INTO mcp_servers (name, command, args_json, note, created_gen)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET
+               command = excluded.command, args_json = excluded.args_json,
+               note = excluded.note, created_gen = excluded.created_gen",
+            params![name, command, args_json, note, generation],
+        )?;
+        Ok(())
+    }
+
+    /// All registered downstream MCP servers, by name.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn mcp_servers(&self) -> Result<Vec<McpServer>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT name, command, args_json, note, created_gen FROM mcp_servers ORDER BY name",
+        )?;
+        let rows = stmt
+            .query_map([], row_to_mcp_server)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// One registered server by name, or `None`.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn mcp_server(&self, name: &str) -> Result<Option<McpServer>, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        let server = conn
+            .query_row(
+                "SELECT name, command, args_json, note, created_gen
+                 FROM mcp_servers WHERE name = ?1",
+                params![name],
+                row_to_mcp_server,
+            )
+            .optional()?;
+        Ok(server)
+    }
+
+    /// Remove a registered server by name. Returns false when not found.
+    ///
+    /// # Errors
+    /// [`StoreError`] on SQLite failure.
+    pub fn mcp_unregister(&self, name: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().expect("store lock poisoned");
+        Ok(conn.execute("DELETE FROM mcp_servers WHERE name = ?1", params![name])? > 0)
     }
 
     // ── cards (knowledge board) ────────────────────────────────────────
@@ -902,6 +999,7 @@ impl Store {
                     .collect::<Result<Vec<_>, _>>()?;
                 rows
             },
+            mcp_servers: self.mcp_servers()?,
             cards: self.cards_query(None, None, None)?,
         };
         Ok(serde_json::to_string_pretty(&dump).unwrap_or_else(|_| "{}".to_string()))
@@ -943,6 +1041,9 @@ impl Store {
             if let (Some(hash), Some(gen)) = (&w.last_hash, w.last_seen_gen) {
                 self.watch_seen(id, hash, gen)?;
             }
+        }
+        for s in &dump.mcp_servers {
+            self.mcp_register(&s.name, &s.command, &s.args, &s.note, s.created_gen)?;
         }
         for c in &dump.cards {
             self.card_add(&card_input_from(c), c.created_gen)?;
@@ -1164,6 +1265,19 @@ fn row_to_watch(row: &rusqlite::Row<'_>) -> rusqlite::Result<Watch> {
 
 /// Map a `cards` row to a [`Card`]. Column order must match [`CARD_COLS`].
 /// `refs` is left empty — callers fill it via [`load_refs`].
+fn row_to_mcp_server(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpServer> {
+    let args_json: String = row.get(2)?;
+    Ok(McpServer {
+        name: row.get(0)?,
+        command: row.get(1)?,
+        // A malformed args_json degrades to an empty argv rather than failing
+        // the read — the registry stays usable.
+        args: serde_json::from_str(&args_json).unwrap_or_default(),
+        note: row.get(3)?,
+        created_gen: row.get(4)?,
+    })
+}
+
 fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     Ok(Card {
         id: row.get(0)?,
@@ -1240,6 +1354,68 @@ mod tests {
         assert_eq!(watches[0].last_seen_gen, Some(2));
         assert!(store.watch_remove(id).unwrap());
         assert!(store.watches().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_server_lifecycle_register_list_get_unregister() {
+        let store = Store::in_memory().unwrap();
+        store
+            .mcp_register(
+                "gh",
+                "npx",
+                &["-y".into(), "@modelcontextprotocol/server-github".into()],
+                "enterprise github",
+                4,
+            )
+            .unwrap();
+        let servers = store.mcp_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "gh");
+        assert_eq!(servers[0].command, "npx");
+        assert_eq!(
+            servers[0].args,
+            vec!["-y", "@modelcontextprotocol/server-github"]
+        );
+        assert_eq!(servers[0].created_gen, 4);
+
+        let one = store.mcp_server("gh").unwrap().unwrap();
+        assert_eq!(one.command, "npx");
+        assert!(store.mcp_server("nope").unwrap().is_none());
+
+        // Re-register by the same name replaces (upsert), never duplicates.
+        store
+            .mcp_register("gh", "uvx", &["mcp-github".into()], "swapped", 5)
+            .unwrap();
+        let servers = store.mcp_servers().unwrap();
+        assert_eq!(servers.len(), 1, "same name upserts to one row");
+        assert_eq!(servers[0].command, "uvx");
+        assert_eq!(servers[0].created_gen, 5);
+
+        assert!(store.mcp_unregister("gh").unwrap());
+        assert!(!store.mcp_unregister("gh").unwrap(), "already gone");
+        assert!(store.mcp_servers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_servers_export_import_round_trips() {
+        let a = Store::in_memory().unwrap();
+        a.mcp_register("gh", "npx", &["-y".into(), "server-github".into()], "gh", 1)
+            .unwrap();
+        a.mcp_register("jira", "uvx", &["mcp-jira".into()], "", 2)
+            .unwrap();
+
+        let json = a.export_json().unwrap();
+        assert!(json.contains("server-github"), "export carries the argv");
+        // The export carries invocation shape only — never a credential.
+        assert!(!json.contains("token"), "no credential material in export");
+
+        let b = Store::in_memory().unwrap();
+        b.import_json(&json).unwrap();
+        let servers = b.mcp_servers().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "gh");
+        assert_eq!(servers[0].args, vec!["-y", "server-github"]);
+        assert_eq!(servers[1].name, "jira");
     }
 
     #[test]

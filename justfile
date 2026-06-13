@@ -28,6 +28,21 @@ fmt-check:
 live-test:
     MODULEX_LIVE_TESTS=1 cargo test -p modulex-core --test live_contract -- --nocapture
 
+# Local coverage with an HTML report (opens target/llvm-cov/html/index.html).
+# Excludes binary/pyo3 entrypoints (integration-tested, not unit-tested) so
+# the number reflects the library logic the tests actually cover.
+cov:
+    cargo llvm-cov --all-features --workspace \
+        --ignore-filename-regex '(main\.rs|modulex-py/src/lib\.rs)' --html
+    @echo "report: target/llvm-cov/html/index.html"
+
+# CI-mode coverage gate: same scope as `cov`, fails under the floor. Mirrors
+# the `coverage` job in .github/workflows/ci.yml — keep the floor in sync.
+cov-ci:
+    cargo llvm-cov --all-features --workspace \
+        --ignore-filename-regex '(main\.rs|modulex-py/src/lib\.rs)' \
+        --fail-under-lines 80
+
 # Run the CLI against the example config (dry run; no side effects).
 demo:
     MODULEX_CONFIG=modulex.toml.example cargo run -p modulex-cli -- run morning --dry-run
