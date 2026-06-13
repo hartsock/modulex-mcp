@@ -1,0 +1,32 @@
+{
+  "properties": {
+    "detail": {
+      "description": "error/denial text",
+      "type": "string"
+    },
+    "result": {
+      "description": "the downstream tool result (state=ok); never contains credentials"
+    },
+    "server": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "ok",
+        "denied",
+        "error",
+        "skipped"
+      ],
+      "type": "string"
+    },
+    "tool": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "server",
+    "tool",
+    "state"
+  ],
+  "type": "object"
+}

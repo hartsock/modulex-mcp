@@ -22,6 +22,7 @@
 //! | `board-ingest` | [`board_ingest`] | gh (issues → store cards) |
 //! | `python` | [`python`] | the configured interpreter (plugin protocol) |
 //! | `reminders` | [`reminders`] | — (agent state store) |
+//! | `mcp-query` | [`mcp_query`] | a registered downstream MCP (leashed stdio client) |
 //! | `url-watch` | [`web`] | — (leashed in-proc fetch; feature `web`) |
 
 use std::sync::Arc;
@@ -34,6 +35,7 @@ pub mod dates;
 pub mod git;
 pub mod github;
 pub mod gitlab;
+pub mod mcp_query;
 pub mod project;
 pub mod python;
 pub mod reminders;
@@ -65,6 +67,7 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(board_ingest::BoardIngest));
     registry.register(Arc::new(python::PythonPlugin));
     registry.register(Arc::new(reminders::Reminders));
+    registry.register(Arc::new(mcp_query::McpQuery));
     #[cfg(feature = "web")]
     registry.register(Arc::new(web::UrlWatch::new()));
     registry
@@ -98,6 +101,7 @@ mod tests {
             "board-ingest",
             "python",
             "reminders",
+            "mcp-query",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }

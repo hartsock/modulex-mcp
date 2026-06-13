@@ -44,7 +44,7 @@ pub use exec::{ExecGate, ExecOutput, ExecRequest, Spawner, TokioSpawner};
 pub use registry::StepRegistry;
 pub use report::{RepoResult, Report, StepResult};
 pub use step::{RunContext, StepHandler};
-pub use store::Store;
+pub use store::{McpServer, Store};
 
 // Re-export the leash vocabulary so embedders don't need a direct
 // agent-bridle-core dependency to construct grants.

@@ -26,3 +26,22 @@ jobs:
         run: |
           cargo check -p modulex-cli --no-default-features --locked
           cargo check -p modulex-mcp --no-default-features --locked
+
+  # COVERAGE GATE: mirrors `just cov-ci`. The floor (80% lines) is enforced
+  # here; keep it in sync with the justfile. Binary/pyo3 entrypoints are
+  # excluded (integration-tested, not unit-tested).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage (fail under the floor)
+        run: |
+          cargo llvm-cov --all-features --workspace \
+            --ignore-filename-regex '(main\.rs|modulex-py/src/lib\.rs)' \
+            --fail-under-lines 80
