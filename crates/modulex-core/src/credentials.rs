@@ -143,9 +143,17 @@ impl CredentialRef {
                 if !out.success() {
                     return Err(CredentialError::CommandFailed(
                         cmd.clone(),
-                        // stderr may carry diagnostics; stdout may carry the
-                        // secret — only stderr is safe to surface.
-                        out.stderr.trim().to_string(),
+                        // NEITHER stream is safe to surface: a failing secret
+                        // helper (`gh auth token`, `vault`, `pass`, custom
+                        // wrappers) routinely echoes the very token it tried on
+                        // BOTH stdout and stderr. This error is embedded into
+                        // agent-visible step results (the credential-proxy
+                        // premise is "the agent never sees a credential"), so
+                        // we surface only the exit status, never the body.
+                        match out.status {
+                            Some(code) => format!("exited with status {code}"),
+                            None => "did not exit normally".to_string(),
+                        },
                     ));
                 }
                 Ok(Secret::new(out.stdout.trim().to_string()))
@@ -217,6 +225,50 @@ mod tests {
         .await
         .unwrap_err();
         assert!(denied.to_string().contains("vault"));
+    }
+
+    /// Adversarial regression (review #58): a failing `{cmd}` secret helper
+    /// routinely echoes the token it tried on its OWN stderr/stdout. That body
+    /// must NEVER reach the `CredentialError` — it is embedded into
+    /// agent-visible step results, the surface the credential proxy exists to
+    /// keep credential-free. Only the exit status is surfaced.
+    #[tokio::test]
+    async fn failing_cmd_helper_never_surfaces_its_stderr_body() {
+        use std::sync::Arc;
+
+        use agent_bridle_core::{Caveats, Scope};
+
+        use crate::exec::test_support::{gate_with, MockSpawner};
+
+        // The helper exits non-zero and prints the token it was resolving.
+        let leaked = "ghp_SECRET_ON_FAILURE_STDERR";
+        let spawner = Arc::new(MockSpawner::with_outputs(vec![MockSpawner::fail(
+            &format!("error: token {leaked} is expired, re-auth required"),
+            1,
+        )]));
+        let granted = Caveats {
+            exec: Scope::only(["gh".to_string()]),
+            ..Caveats::top()
+        };
+        let gate = gate_with(&granted, spawner);
+
+        let err = CredentialRef::Cmd {
+            cmd: "gh auth token".into(),
+        }
+        .resolve(&gate)
+        .await
+        .unwrap_err();
+
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains(leaked),
+            "credential helper stderr leaked into the error: {rendered}"
+        );
+        // It still tells the operator what happened — just the status, no body.
+        assert!(
+            rendered.contains("status 1"),
+            "the failure should surface the exit status: {rendered}"
+        );
     }
 
     // The "Secret is not serializable" guarantee is enforced by the
