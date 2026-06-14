@@ -103,7 +103,7 @@ impl Engine {
             (!config.store.path.is_empty()).then_some(config.store.path.as_str()),
             home.as_deref(),
         );
-        let store = match crate::store::Store::open(&path) {
+        let store = match crate::store::Store::open_with_policy(&config.store.policy, &path) {
             Ok(store) => Some(Arc::new(store)),
             Err(e) => {
                 eprintln!(

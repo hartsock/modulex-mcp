@@ -21,6 +21,9 @@ repository = "https://github.com/hartsock/modulex-mcp"
 [workspace.dependencies]
 modulex-core = { path = "crates/modulex-core", version = "=0.1.0" }
 
+# agent-store: causal-store substrate (Generation counter, SqliteBackend).
+agent-store = "0.1"
+
 agent-bridle-core = "0.1.0"
 agent-bridle-tool-web = "0.1.0"
 anyhow = "1.0"
