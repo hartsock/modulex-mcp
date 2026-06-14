@@ -184,12 +184,17 @@ pub struct McpConfig {
     pub deny: Vec<String>,
 }
 
-/// Agent state store location (`[store]`).
+/// Agent state store config (`[store]`).
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct StoreConfig {
     /// SQLite path; empty = `$MODULEX_STORE` → `~/.modulex/store.db`.
     #[serde(default)]
     pub path: String,
+    /// Backend-selection policy — a flat knob, `[store] backend = "sqlite"`.
+    /// Defaults to the safe, daemonless SQLite backend; change direction
+    /// (Postgres, later) by editing config, not code.
+    #[serde(flatten)]
+    pub policy: agent_store::StorePolicy,
 }
 
 /// A fixed date to count down to.
@@ -366,6 +371,26 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_backend_is_a_flat_policy_knob() {
+        // The agent-store StorePolicy flattens into [store] as a flat knob,
+        // alongside `path`, parsed via the real Config path.
+        let cfg = Config::from_toml(
+            r#"
+[store]
+path = "/tmp/x.db"
+backend = "postgres"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.store.path, "/tmp/x.db");
+        assert_eq!(cfg.store.policy.backend, agent_store::BackendKind::Postgres);
+
+        // Default: no backend key => the safe SQLite default.
+        let cfg = Config::from_toml("[store]\npath = \"/tmp/y.db\"\n").unwrap();
+        assert_eq!(cfg.store.policy.backend, agent_store::BackendKind::Sqlite);
+    }
 
     #[test]
     fn minimal_routine_parses_with_flattened_params() {

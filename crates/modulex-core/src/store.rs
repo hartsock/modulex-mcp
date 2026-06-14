@@ -413,6 +413,30 @@ impl Store {
         Ok(store)
     }
 
+    /// Open the store the [`StorePolicy`](agent_store::StorePolicy) selects.
+    ///
+    /// modulex's domain tables are SQLite-specific today, so the `postgres`
+    /// backend is reserved (Phase 2) and rejected with a clear error; the
+    /// caller treats that as a soft "store unavailable" and skips store-backed
+    /// steps. The default policy selects SQLite — i.e. [`Store::open`].
+    ///
+    /// # Errors
+    /// [`StoreError`] when SQLite fails, or when the policy selects a backend
+    /// this build does not support yet.
+    pub fn open_with_policy(
+        policy: &agent_store::StorePolicy,
+        path: &Path,
+    ) -> Result<Self, StoreError> {
+        match policy.backend {
+            agent_store::BackendKind::Sqlite => Self::open(path),
+            agent_store::BackendKind::Postgres => Err(StoreError::Substrate(
+                "store backend = \"postgres\" is reserved (Phase 2); modulex \
+                 supports the sqlite backend today"
+                    .into(),
+            )),
+        }
+    }
+
     /// An in-memory store (tests, ephemeral runs).
     ///
     /// # Errors
@@ -1788,6 +1812,18 @@ mod tests {
             .optional()
             .unwrap();
         assert_eq!(leftover, None, "legacy row dropped after migration");
+    }
+
+    #[test]
+    fn policy_rejects_reserved_postgres_backend() {
+        // Regression: selecting the reserved postgres backend must fail loudly
+        // (the caller turns this into a soft "store unavailable" skip), never
+        // silently fall back to a different store.
+        let policy = agent_store::StorePolicy {
+            backend: agent_store::BackendKind::Postgres,
+        };
+        let result = Store::open_with_policy(&policy, std::path::Path::new("/tmp/unused.db"));
+        assert!(matches!(result, Err(StoreError::Substrate(_))));
     }
 
     #[test]

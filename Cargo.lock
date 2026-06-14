@@ -61,13 +61,14 @@ dependencies = [
 
 [[package]]
 name = "agent-store"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ac3e888dd76c9d1cdeb43bc023abd1c0e330710db2cfd8d533a7dd9c5692dfc"
+checksum = "6ba8b3df4afcd4972c97a317640cfa09fcb05d17f85a70e8c66daf006d08ad6d"
 dependencies = [
  "anyhow",
  "blake3",
  "rusqlite",
+ "serde",
  "thiserror 2.0.18",
 ]
 
