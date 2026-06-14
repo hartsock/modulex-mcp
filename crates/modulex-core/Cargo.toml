@@ -20,6 +20,7 @@ test-support = []
 [dependencies]
 agent-bridle-core = { workspace = true }
 agent-bridle-tool-web = { workspace = true, optional = true }
+agent-store = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true, optional = true }
 rusqlite = { workspace = true }
