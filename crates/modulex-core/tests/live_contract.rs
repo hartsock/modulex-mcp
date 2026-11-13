@@ -236,9 +236,9 @@ async fn live_gh_pr_list_json_shape() {
     );
 }
 
-/// Presence + version probe for glab (the auth-marker belief — `401` /
-/// `unauthorized` in stderr — can only be exercised against a configured
-/// GitLab host; on such hosts the morning routine itself is the canary).
+/// Presence + version and global-MR JSON-shape probe for glab. The auth-marker
+/// belief (`401` / `unauthorized` in stderr) can only be exercised against a
+/// configured GitLab host; on such hosts the morning routine is the canary.
 #[tokio::test(flavor = "multi_thread")]
 async fn live_glab_presence() {
     if !live() {
@@ -254,6 +254,28 @@ async fn live_glab_presence() {
         .expect("glab spawns");
     assert!(out.success(), "glab --version failed: {}", out.stderr);
     eprintln!("live-contract: {}", out.stdout.trim());
+
+    let out = gate
+        .spawn(ExecRequest::new("glab").args(vec![
+            "api".into(),
+            "merge_requests?scope=all&state=opened&order_by=updated_at&sort=desc&per_page=1".into(),
+        ]))
+        .await
+        .expect("glab api spawns");
+    assert!(out.success(), "glab api failed: {}", out.stderr);
+    let mrs: Vec<serde_json::Value> =
+        serde_json::from_str(out.stdout.trim()).expect("glab api emits a JSON array");
+    for mr in &mrs {
+        for field in ["title", "web_url", "created_at", "updated_at"] {
+            assert!(mr[field].is_string(), "{field} drifted: {mr}");
+        }
+        assert!(mr["iid"].is_i64(), "iid drifted: {mr}");
+        assert!(mr["draft"].is_boolean(), "draft drifted: {mr}");
+        assert!(
+            mr["references"]["full"].is_string(),
+            "references.full drifted: {mr}"
+        );
+    }
 }
 
 /// Verifies the harness step's JSON-on-stdout contract against a REAL

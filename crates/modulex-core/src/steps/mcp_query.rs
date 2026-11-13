@@ -42,6 +42,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::{json, Value};
 
 use crate::config::{expand_tilde, StepSpec};
@@ -140,6 +141,107 @@ pub fn parse_call_response(stdout: &str) -> CallOutcome {
 /// Render a tool result as a human-readable report body. MCP `tools/call`
 /// results carry a `content` array of typed blocks; we surface text blocks and
 /// fall back to compact JSON for anything else.
+fn compact_text(value: &str, limit: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= limit {
+        compact
+    } else {
+        format!("{}…", compact.chars().take(limit).collect::<String>())
+    }
+}
+
+fn age_label_at(value: &str, now: DateTime<Utc>) -> &'static str {
+    let Ok(updated) = DateTime::parse_from_rfc3339(value) else {
+        return "AGE UNKNOWN";
+    };
+    let age = now - updated.with_timezone(&Utc);
+    if age <= ChronoDuration::hours(72) {
+        "FRESH ≤72h"
+    } else if age > ChronoDuration::days(7) {
+        "COLD >7d"
+    } else {
+        "ACTIVE 72h–7d"
+    }
+}
+
+fn render_search_json(value: &Value) -> Option<String> {
+    if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+        if messages.is_empty() {
+            return Some("(no matching Slack messages)".into());
+        }
+        let lines = messages
+            .iter()
+            .map(|message| {
+                let timestamp = message
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown time");
+                let channel = message
+                    .get("channel")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown-channel");
+                let text = message
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| compact_text(text, 260))
+                    .unwrap_or_default();
+                let url = message
+                    .get("permalink")
+                    .or_else(|| message.get("sourceUrl"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let attention = if message
+                    .get("needs_attention")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    " **ACTION?**"
+                } else {
+                    ""
+                };
+                let age = age_label_at(timestamp, Utc::now());
+                format!(
+                    "- {timestamp} · **{age}** · #{channel}{attention} — {text} ([source]({url}))"
+                )
+            })
+            .collect::<Vec<_>>();
+        return Some(lines.join("\n"));
+    }
+
+    if let Some(items) = value.get("items").and_then(Value::as_array) {
+        if items.is_empty() {
+            return Some("(no matching enterprise/Jira results)".into());
+        }
+        let lines = items
+            .iter()
+            .map(|item| {
+                let title = item
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled");
+                let url = item.get("url").and_then(Value::as_str).unwrap_or("");
+                let updated = item
+                    .get("lastUpdated")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown update");
+                let source = item
+                    .get("datasource")
+                    .and_then(Value::as_str)
+                    .unwrap_or("enterprise");
+                let snippet = item
+                    .get("snippet")
+                    .and_then(Value::as_str)
+                    .map(|text| compact_text(text, 260))
+                    .unwrap_or_default();
+                let age = age_label_at(updated, Utc::now());
+                format!("- [{title}]({url}) · {source} · **{age}** · updated {updated} — {snippet}")
+            })
+            .collect::<Vec<_>>();
+        return Some(lines.join("\n"));
+    }
+    None
+}
+
 fn render_result(result: &Value) -> String {
     if let Some(content) = result.get("content").and_then(Value::as_array) {
         let mut chunks = Vec::new();
@@ -147,7 +249,11 @@ fn render_result(result: &Value) -> String {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
-                        chunks.push(text.to_string());
+                        let rendered = serde_json::from_str::<Value>(text)
+                            .ok()
+                            .and_then(|value| render_search_json(&value))
+                            .unwrap_or_else(|| text.to_string());
+                        chunks.push(rendered);
                     }
                 }
                 _ => chunks.push(block.to_string()),
@@ -483,6 +589,61 @@ mod tests {
         assert_eq!(render_result(&r), "hello\nworld");
         // Non-content results fall back to JSON.
         assert_eq!(render_result(&json!({"k":1})), "{\"k\":1}");
+    }
+
+    #[test]
+    fn render_result_compacts_slack_search_json() {
+        let result = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::json!({
+                    "messages": [{
+                        "timestamp": "2026-07-13T12:00:00Z",
+                        "channel": "team",
+                        "text": "Please review this",
+                        "permalink": "https://slack/message",
+                        "needs_attention": true
+                    }]
+                }).to_string()
+            }]
+        });
+        let rendered = render_result(&result);
+        assert!(rendered.contains("#team **ACTION?**"));
+        assert!(rendered.contains("Please review this"));
+        assert!(rendered.contains("[source](https://slack/message)"));
+        assert!(!rendered.contains("needs_attention"));
+    }
+
+    #[test]
+    fn render_result_compacts_enterprise_search_json() {
+        let result = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::json!({
+                    "items": [{
+                        "title": "SCM-123",
+                        "url": "https://jira/SCM-123",
+                        "datasource": "jira",
+                        "lastUpdated": "2026-07-13T12:00:00Z",
+                        "snippet": "Blocked waiting for approval"
+                    }]
+                }).to_string()
+            }]
+        });
+        let rendered = render_result(&result);
+        assert!(rendered.contains("[SCM-123](https://jira/SCM-123)"));
+        assert!(rendered.contains("Blocked waiting for approval"));
+        assert!(!rendered.contains("result_content"));
+    }
+
+    #[test]
+    fn age_labels_match_fresh_active_and_cold_policy() {
+        let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(age_label_at("2026-07-11T12:00:00Z", now), "FRESH ≤72h");
+        assert_eq!(age_label_at("2026-07-08T12:00:00Z", now), "ACTIVE 72h–7d");
+        assert_eq!(age_label_at("2026-07-06T11:59:59Z", now), "COLD >7d");
     }
 
     // ── leashed run tests (mocked spawner) ─────────────────────────────

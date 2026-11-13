@@ -144,6 +144,14 @@ name = "team MRs"
 type = "gitlab-group-mrs"
 
 [[routines.morning.steps]]
+name = "team-authored MRs"
+type = "gitlab-team-mrs"
+authors = ["alice", "bob"]
+fresh_hours = 72
+cold_days = 7
+env = { GITLAB_TOKEN = { cmd = "pass show gitlab/token" } }
+
+[[routines.morning.steps]]
 name = "MR SLA"
 type = "mr-sla-check"
 response_hours = 24

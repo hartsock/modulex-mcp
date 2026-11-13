@@ -263,12 +263,10 @@ mod tests {
     }
 
     /// A spec whose script points at a real file (the protocol test needs
-    /// the is_file() probe to pass; /etc/hostname exists on our targets).
+    /// the is_file() probe to pass; /etc/hosts exists on macOS and Linux).
     fn spec() -> StepSpec {
-        toml::from_str(
-            "name=\"notes\"\ntype=\"python\"\nscript=\"/etc/hostname\"\nextra_param=\"x\"",
-        )
-        .unwrap()
+        toml::from_str("name=\"notes\"\ntype=\"python\"\nscript=\"/etc/hosts\"\nextra_param=\"x\"")
+            .unwrap()
     }
 
     #[tokio::test]
@@ -287,7 +285,7 @@ mod tests {
         // python3 invoked with the script path.
         let calls = spawner.calls.lock().unwrap();
         assert_eq!(calls[0].0, "python3");
-        assert_eq!(calls[0].1, vec!["/etc/hostname"]);
+        assert_eq!(calls[0].1, vec!["/etc/hosts"]);
     }
 
     #[tokio::test]

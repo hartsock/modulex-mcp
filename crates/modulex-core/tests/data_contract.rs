@@ -145,6 +145,11 @@ name = "groups"
 type = "gitlab-group-mrs"
 
 [[routines.contract.steps]]
+name = "team"
+type = "gitlab-team-mrs"
+authors = ["teammate"]
+
+[[routines.contract.steps]]
 name = "sla"
 type = "mr-sla-check"
 
@@ -205,6 +210,7 @@ async fn executed_step_data_validates_against_schema() {
         MockSpawner::ok("!1 mr\n"),                   // glab authored
         MockSpawner::ok(""),                          // glab review (none)
         MockSpawner::ok("!2 mr\n"),                   // glab groups
+        MockSpawner::ok("[]"),                        // glab team (none)
         MockSpawner::ok(""),                          // mr-categorize: list (no MRs)
         MockSpawner::ok("[]"),                        // project-status: open issues
         MockSpawner::ok("[]"),                        // project-status: open PRs

@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "mr": {
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "iid": {
+          "type": "integer"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "web_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference",
+        "iid",
+        "title",
+        "web_url",
+        "created_at",
+        "updated_at",
+        "draft"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "cold_days": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "fresh_hours": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "members": {
+      "items": {
+        "properties": {
+          "active": {
+            "items": {
+              "$ref": "#/$defs/mr"
+            },
+            "type": "array"
+          },
+          "cold": {
+            "items": {
+              "$ref": "#/$defs/mr"
+            },
+            "type": "array"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "fresh": {
+            "items": {
+              "$ref": "#/$defs/mr"
+            },
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "auth-failed",
+              "error"
+            ],
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "state",
+          "fresh",
+          "active",
+          "cold"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "fresh_hours",
+    "cold_days",
+    "members"
+  ],
+  "type": "object"
+}

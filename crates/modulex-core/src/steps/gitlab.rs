@@ -1,5 +1,5 @@
 //! GitLab steps via the `glab` CLI: `gitlab-mr-authored`, `gitlab-mr-review`,
-//! `gitlab-group-mrs`, and the derived `mr-sla-check`.
+//! `gitlab-group-mrs`, `gitlab-team-mrs`, and the derived `mr-sla-check`.
 //!
 //! Output is `glab`'s human text, passed through per project/group — the
 //! same contract the proven Python handlers used. Auth failures
@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Duration as ChronoDuration;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::config::StepSpec;
 use crate::credentials::Secret;
@@ -352,6 +352,266 @@ impl StepHandler for GitlabGroupMrs {
                 .push(run_glab(&cx.exec, &group.name, args, env.clone(), spec.timeout).await);
         }
         aggregate(spec, cx, repo_results, "(no group MR activity)")
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct TeamMr {
+    iid: i64,
+    title: String,
+    web_url: String,
+    created_at: String,
+    updated_at: String,
+    #[serde(default)]
+    draft: bool,
+    references: TeamMrReferences,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct TeamMrReferences {
+    full: String,
+}
+
+fn team_mrs_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["fresh_hours", "cold_days", "members"],
+        "properties": {
+            "fresh_hours": { "type": "integer", "minimum": 1 },
+            "cold_days": { "type": "integer", "minimum": 1 },
+            "members": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["username", "state", "fresh", "active", "cold"],
+                    "properties": {
+                        "username": { "type": "string" },
+                        "state": { "type": "string", "enum": ["ok", "auth-failed", "error"] },
+                        "detail": { "type": "string" },
+                        "fresh": { "type": "array", "items": { "$ref": "#/$defs/mr" } },
+                        "active": { "type": "array", "items": { "$ref": "#/$defs/mr" } },
+                        "cold": { "type": "array", "items": { "$ref": "#/$defs/mr" } }
+                    }
+                }
+            }
+        },
+        "$defs": {
+            "mr": {
+                "type": "object",
+                "required": ["reference", "iid", "title", "web_url", "created_at", "updated_at", "draft"],
+                "properties": {
+                    "reference": { "type": "string" },
+                    "iid": { "type": "integer" },
+                    "title": { "type": "string" },
+                    "web_url": { "type": "string" },
+                    "created_at": { "type": "string" },
+                    "updated_at": { "type": "string" },
+                    "draft": { "type": "boolean" }
+                }
+            }
+        }
+    })
+}
+
+fn mr_value(mr: &TeamMr) -> serde_json::Value {
+    serde_json::json!({
+        "reference": mr.references.full,
+        "iid": mr.iid,
+        "title": mr.title,
+        "web_url": mr.web_url,
+        "created_at": mr.created_at,
+        "updated_at": mr.updated_at,
+        "draft": mr.draft,
+    })
+}
+
+fn bucket_team_mrs(
+    mrs: &[TeamMr],
+    now: DateTime<Utc>,
+    fresh_hours: i64,
+    cold_days: i64,
+) -> (
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+) {
+    let fresh_cutoff = now - ChronoDuration::hours(fresh_hours);
+    let cold_cutoff = now - ChronoDuration::days(cold_days);
+    let mut fresh = Vec::new();
+    let mut active = Vec::new();
+    let mut cold = Vec::new();
+    for mr in mrs {
+        let value = mr_value(mr);
+        let updated_at = DateTime::parse_from_rfc3339(&mr.updated_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(now);
+        if updated_at >= fresh_cutoff {
+            fresh.push(value);
+        } else if updated_at < cold_cutoff {
+            cold.push(value);
+        } else {
+            active.push(value);
+        }
+    }
+    (fresh, active, cold)
+}
+
+fn render_team_bucket(lines: &mut Vec<String>, label: &str, items: &[serde_json::Value]) {
+    if items.is_empty() {
+        return;
+    }
+    lines.push(format!("**{label}**"));
+    for item in items {
+        let reference = item["reference"].as_str().unwrap_or("");
+        let title = item["title"].as_str().unwrap_or("");
+        let url = item["web_url"].as_str().unwrap_or("");
+        let updated = item["updated_at"].as_str().unwrap_or("");
+        lines.push(format!(
+            "- [{reference}]({url}) — {title} (updated {updated})"
+        ));
+    }
+}
+
+/// `gitlab-team-mrs`: global open MRs for configured authors, age-bucketed.
+pub struct GitlabTeamMrs;
+
+#[async_trait]
+impl StepHandler for GitlabTeamMrs {
+    fn type_name(&self) -> &'static str {
+        "gitlab-team-mrs"
+    }
+
+    fn description(&self) -> &'static str {
+        "Global open merge requests per configured author, bucketed fresh / active / cold"
+    }
+
+    fn data_schema(&self) -> serde_json::Value {
+        team_mrs_schema()
+    }
+
+    fn required_programs(&self, _spec: &StepSpec) -> Vec<String> {
+        vec!["glab".into()]
+    }
+
+    async fn run(&self, spec: &StepSpec, cx: &RunContext) -> StepResult {
+        let authors = spec.param_str_list("authors");
+        if authors.is_empty() {
+            let mut result =
+                StepResult::ok(&spec.name, &spec.step_type, "No team authors configured.");
+            result.data = Some(serde_json::json!({
+                "fresh_hours": 72, "cold_days": 7, "members": []
+            }));
+            return result;
+        }
+        let fresh_hours = spec.param_int("fresh_hours").unwrap_or(72).max(1);
+        let cold_days = spec.param_int("cold_days").unwrap_or(7).max(1);
+        if cx.dry_run {
+            return StepResult::ok(
+                &spec.name,
+                &spec.step_type,
+                authors
+                    .iter()
+                    .map(|u| format!("[dry-run] would query global open MRs for {u}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        let env = match step_env_or_skip(spec, cx).await {
+            Ok(env) => env,
+            Err(skip) => return skip,
+        };
+        let now = Utc::now();
+        let mut members = Vec::new();
+        let mut lines = Vec::new();
+        let mut auth_failures = 0usize;
+        for username in &authors {
+            let endpoint = format!(
+                "merge_requests?author_username={username}&scope=all&state=opened&order_by=updated_at&sort=desc&per_page=100"
+            );
+            let out = cx
+                .exec
+                .spawn(
+                    ExecRequest::new("glab")
+                        .args(vec!["api".to_string(), endpoint])
+                        .env(env.clone())
+                        .timeout(Duration::from_secs(spec.timeout)),
+                )
+                .await;
+            lines.push(format!("### {username}"));
+            match out {
+                Ok(out) if out.success() => {
+                    match serde_json::from_str::<Vec<TeamMr>>(&out.stdout) {
+                        Ok(mrs) => {
+                            let (fresh, active, cold) =
+                                bucket_team_mrs(&mrs, now, fresh_hours, cold_days);
+                            if fresh.is_empty() && active.is_empty() && cold.is_empty() {
+                                lines.push("(no open MRs)".into());
+                            } else {
+                                render_team_bucket(&mut lines, "Fresh (last 72h)", &fresh);
+                                render_team_bucket(&mut lines, "Active (72h–7d)", &active);
+                                render_team_bucket(&mut lines, "Cold backlog (>7d)", &cold);
+                            }
+                            members.push(serde_json::json!({
+                                "username": username, "state": "ok",
+                                "fresh": fresh, "active": active, "cold": cold,
+                            }));
+                        }
+                        Err(error) => {
+                            let detail = format!("invalid GitLab JSON: {error}");
+                            lines.push(format!("ERROR: {detail}"));
+                            members.push(serde_json::json!({
+                                "username": username, "state": "error", "detail": detail,
+                                "fresh": [], "active": [], "cold": [],
+                            }));
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let detail = out.stderr.trim().to_string();
+                    let state = if is_auth_error(&detail) {
+                        auth_failures += 1;
+                        "auth-failed"
+                    } else {
+                        "error"
+                    };
+                    lines.push(format!("ERROR: {detail}"));
+                    members.push(serde_json::json!({
+                        "username": username, "state": state, "detail": detail,
+                        "fresh": [], "active": [], "cold": [],
+                    }));
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    lines.push(format!("ERROR: {detail}"));
+                    members.push(serde_json::json!({
+                        "username": username, "state": "error", "detail": detail,
+                        "fresh": [], "active": [], "cold": [],
+                    }));
+                }
+            }
+        }
+        if auth_failures == authors.len() {
+            return StepResult::skip(
+                &spec.name,
+                &spec.step_type,
+                format!(
+                    "All GitLab queries failed — token likely expired. Run: glab auth login --hostname {}",
+                    cx.config.identity.gitlab_host
+                ),
+            );
+        }
+        let mut result = StepResult::ok(&spec.name, &spec.step_type, lines.join("\n"));
+        if members
+            .iter()
+            .any(|member| member["state"].as_str() != Some("ok"))
+        {
+            result.success = false;
+            result.error = Some("one or more team MR queries failed".into());
+        }
+        result.data = Some(serde_json::json!({
+            "fresh_hours": fresh_hours, "cold_days": cold_days, "members": members,
+        }));
+        result
     }
 }
 
@@ -945,6 +1205,52 @@ scan = "all"
             calls[0].1,
             vec!["mr", "list", "--reviewer=someone", "-R", "group/a"]
         );
+    }
+
+    #[test]
+    fn team_mrs_bucket_by_recent_active_and_cold_updates() {
+        let mrs: Vec<TeamMr> = serde_json::from_str(
+            r#"[
+              {"iid":1,"title":"fresh","web_url":"https://g/1","created_at":"2026-07-01T12:00:00Z","updated_at":"2026-07-12T12:00:00Z","draft":false,"references":{"full":"g/p!1"}},
+              {"iid":2,"title":"active","web_url":"https://g/2","created_at":"2026-07-01T12:00:00Z","updated_at":"2026-07-08T12:00:00Z","draft":false,"references":{"full":"g/p!2"}},
+              {"iid":3,"title":"cold","web_url":"https://g/3","created_at":"2026-06-01T12:00:00Z","updated_at":"2026-07-05T11:59:59Z","draft":true,"references":{"full":"g/p!3"}}
+            ]"#,
+        )
+        .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (fresh, active, cold) = bucket_team_mrs(&mrs, now, 72, 7);
+        assert_eq!(fresh[0]["title"], "fresh");
+        assert_eq!(active[0]["title"], "active");
+        assert_eq!(cold[0]["title"], "cold");
+    }
+
+    #[tokio::test]
+    async fn team_mrs_use_global_author_query_and_emit_typed_members() {
+        // FIXTURE-SYNC: fields are verified against real `glab api` output by
+        // tests/live_contract.rs::live_glab_presence.
+        let response = r#"[{"iid":46,"title":"tests","web_url":"https://g/46","created_at":"2099-01-01T00:00:00Z","updated_at":"2099-01-02T00:00:00Z","draft":false,"references":{"full":"g/p!46"}}]"#;
+        let (cx, spawner) = cx_with(GL_CONFIG, vec![MockSpawner::ok(response)]);
+        let team_spec: StepSpec = toml::from_str(
+            "name=\"team\"\ntype=\"gitlab-team-mrs\"\nauthors=[\"alice\"]\nfresh_hours=72\ncold_days=7",
+        )
+        .unwrap();
+        let result = GitlabTeamMrs.run(&team_spec, &cx).await;
+        assert!(result.success);
+        assert_eq!(
+            result.data.as_ref().unwrap()["members"][0]["username"],
+            "alice"
+        );
+        assert_eq!(
+            result.data.as_ref().unwrap()["members"][0]["fresh"][0]["iid"],
+            46
+        );
+        let calls = spawner.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "glab");
+        assert_eq!(calls[0].1[0], "api");
+        assert!(calls[0].1[1].contains("author_username=alice"));
+        assert!(calls[0].1[1].contains("state=opened"));
     }
 
     #[tokio::test]

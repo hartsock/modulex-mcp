@@ -14,6 +14,7 @@
 //! | `gitlab-mr-authored` | [`gitlab`] | glab |
 //! | `gitlab-mr-review` | [`gitlab`] | glab |
 //! | `gitlab-group-mrs` | [`gitlab`] | glab |
+//! | `gitlab-team-mrs` | [`gitlab`] | glab |
 //! | `mr-sla-check` | [`gitlab`] | — (derived from prior results) |
 //! | `mr-categorize` | [`gitlab`] | glab (list + per-MR api enrichment) |
 //! | `board-scan` | [`board`] | — (filesystem lane dirs) |
@@ -59,6 +60,7 @@ pub fn builtin_registry() -> StepRegistry {
     registry.register(Arc::new(gitlab::GitlabMrAuthored));
     registry.register(Arc::new(gitlab::GitlabMrReview));
     registry.register(Arc::new(gitlab::GitlabGroupMrs));
+    registry.register(Arc::new(gitlab::GitlabTeamMrs));
     registry.register(Arc::new(gitlab::MrSlaCheck));
     registry.register(Arc::new(gitlab::MrCategorize));
     registry.register(Arc::new(board::BoardScan));
@@ -93,6 +95,7 @@ mod tests {
             "gitlab-mr-authored",
             "gitlab-mr-review",
             "gitlab-group-mrs",
+            "gitlab-team-mrs",
             "mr-sla-check",
             "mr-categorize",
             "board-scan",
